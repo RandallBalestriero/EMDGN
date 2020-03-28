@@ -9,6 +9,16 @@ from tqdm import tqdm
 
 VERBOSE = 0
 
+
+def find_region(x, regions, f):
+    x_signs = []
+    for x_ in x:
+        x_signs.append(f(x_)[-1])
+    x_signs = np.array(x_signs)
+
+    return np.equal(x_signs[:, None, :], regions).prod(2).argmax(1)
+
+
 def get_simplices(vertices):  
     """compute the simplices from a convex polytope given in its
     V-representation
@@ -37,22 +47,25 @@ def flip(A, i):
         sign = sign[:, None]
     return A * sign
 
-def search_region(A, b, S, signs):
-    print(len(S), b.shape, A.shape)
+def arreq_in_list(myarr, list_arrays):
+    return next((True for elem in list_arrays if np.array_equal(elem, myarr)), False)
 
-    I = cdd.Matrix(np.hstack((b.reshape((-1, 1)), A)))
-    I.rep_type = cdd.RepType.INEQUALITY 
-    I = [i for i in range(len(A)) if i not in list(I.canonicalize()[1])]
 
-    newregion = [I, list(signs[I])]
+def search_region(all_g, S, signs):
 
-    if newregion in S:
+    if arreq_in_list(signs, S):
         return
-    
-    S.append(newregion)
 
-    for i in I:
-        search_region(flip(A, i), flip(b, i), S, flip(signs, i))
+    S.append(signs)
+    ineq = all_g(signs)
+
+    I = cdd.Matrix(np.hstack([ineq[:, [0]], ineq[:, 1:]]))
+    I.rep_type = cdd.RepType.INEQUALITY 
+    I = list(set(range(len(signs))) - set(I.canonicalize()[1]))
+    M = np.ones((len(I), len(signs)))
+    M[np.arange(len(I)), I] = -1
+    for m in M:
+        search_region(all_g, S, signs * m)
 
 
 
@@ -263,6 +276,7 @@ def compute_mean_cov(x, A_w, b_w, mu_z, Sigma_z, Sigma_x):
         sigma_w = np.linalg.inv(inv_sigma_w)
     else:
         sigma_w = 1/inv_sigma_w
+    print('musigma', mu_w, inv_sigma_w, A_w, b_w, x - b_w)
     return mu_w, sigma_w
 
 ############################# alpha computations
@@ -316,7 +330,29 @@ def compute_alphas(ineq_A, ineq_B, signs, x, mu_w, cov_w):
 def compute_kappa(x, mu_w, cov_w, cov_x, b_w):
     value = 0.5 * (mu_w * np.linalg.inv(cov_w).dot(mu_w)).sum()\
             - 0.5 * ((x - b_w) * np.linalg.inv(cov_x).dot(x - b_w)).sum()
-    return np.exp(min(value, 2))
+    print((x - b_w), mu_w, np.linalg.inv(cov_w))
+    return np.exp(value)
+
+############################# get all A,B
+def get_AB(ineq_A, ineq_B, signs, regions, get_Ab):
+
+    all_As = []
+    all_Bs = []
+    for (indices, flips) in regions:
+        
+        signs_ = np.copy(signs)
+        signs_[indices] *= flips
+
+        A_w, b_w = get_Ab(signs_)
+        all_As.append(A_w)
+        all_Bs.append(b_w)
+
+    return all_As, all_Bs
+
+
+
+
+
 
 ############################## ALGO 2
 def algo2(x, ineq_A, ineq_B, signs, regions, sigma_x, mu_z, sigma_z,
@@ -346,6 +382,7 @@ def algo2(x, ineq_A, ineq_B, signs, regions, sigma_x, mu_z, sigma_z,
         alpha2.append(alphas[2])
     
         kappas.append(compute_kappa(x, mu_w, cov_w, sigma_x, b_w))
+        print(kappas[-1], alpha0[-1])
 
     kappas = np.nan_to_num(np.array(kappas))
     alpha0 = np.array(alpha0)
