@@ -4,6 +4,8 @@ import numpy as np
 import itertools
 from scipy.spatial import ConvexHull, Delaunay
 from numpy.linalg import lstsq
+from tqdm import tqdm
+
 
 VERBOSE = 0
 
@@ -13,7 +15,6 @@ def get_simplices(vertices):
 
     vertices: array of shape (V, D) with V the number of vertices
     """
-
     return Delaunay(vertices).simplices
 
 def one_step(M):
@@ -30,6 +31,30 @@ def create_H(M):
     return M[K:]
 
 
+def flip(A, i):
+    sign = 1 - 2 * (np.arange(len(A)) == i).astype('float32')
+    if A.ndim == 2:
+        sign = sign[:, None]
+    return A * sign
+
+def search_region(A, b, S, signs):
+    print(len(S), b.shape, A.shape)
+
+    I = cdd.Matrix(np.hstack((b.reshape((-1, 1)), A)))
+    I.rep_type = cdd.RepType.INEQUALITY 
+    I = [i for i in range(len(A)) if i not in list(I.canonicalize()[1])]
+
+    newregion = [I, list(signs[I])]
+
+    if newregion in S:
+        return
+    
+    S.append(newregion)
+
+    for i in I:
+        search_region(flip(A, i), flip(b, i), S, flip(signs, i))
+
+
 
 def get_vertices(inequalitites):
     # create the matrix the inequalities are a matrix of the form
@@ -38,6 +63,9 @@ def get_vertices(inequalitites):
     m.rep_type = cdd.RepType.INEQUALITY
     return m.get_generators()
 
+
+def univariate_gaussian_integral(low, high, mu, cov):
+    return multivariate_normal.cdf(high, mu=mu, cov=cov) - multivariate_normal.cdf(lower, mu=mu, cov=cov)
 
 def mvstdnormcdf(lower, cov):
     """integrate a multivariate gaussian on rectangular domain
@@ -92,6 +120,9 @@ def F(x, sigma, a, mu, cov):
 
 def E_1(lower, cov):
     return mvstdnormcdf(lower, cov)
+
+def E_0(lower, mu, cov):
+    return mvstdnormcdf(lower-mu, cov)
 
 
 def E_X(lower, cov):
@@ -216,12 +247,124 @@ def simplex_to_cones(vertices):
 
 
 
-def compute_mean_cov(x, A, b, mu_z, Sigma_z, Sigma_x):
-    inv_Sigma_x = np.linalg.inv(Sigma_x)
-    inv_Sigma_z = np.linalg.inv(Sigma_z)
-    sigma = inv_Sigma_z + A.T.dot(inv_Sigma_x.dot(A))
-    mu = sigma.dot(A.T.dot(inv_Sigma_x.dot(x-b)) + inv_Sigma_z.dot(mu_z))
-    sigma = np.linalg.inv(sigma)
-    return mu, sigma
+def compute_mean_cov(x, A_w, b_w, mu_z, Sigma_z, Sigma_x):
 
+    if len(x) > 1:
+        inv_Sigma_x = np.linalg.inv(Sigma_x)
+        inv_Sigma_z = np.linalg.inv(Sigma_z)
+    else:
+        inv_Sigma_x = 1/Sigma_x
+        inv_Sigma_z = 1/Sigma_z
+ 
+    inv_sigma_w = inv_Sigma_z + A_w.T.dot(inv_Sigma_x.dot(A_w))
+    mu_w = inv_sigma_w.dot(A_w.T.dot(inv_Sigma_x.dot(x - b_w))\
+                                     + inv_Sigma_z.dot(mu_z))
+    if len(x) > 1:
+        sigma_w = np.linalg.inv(inv_sigma_w)
+    else:
+        sigma_w = 1/inv_sigma_w
+    return mu_w, sigma_w
+
+############################# alpha computations
+def compute_alphas(ineq_A, ineq_B, signs, x, mu_w, cov_w):
+
+    alpha0 = 0.
+    alpha1 = 0.
+    alpha2 = 0.
+
+    if len(ineq_B) < len(x):
+        lower, mu_, cov_, R = planes_to_rectangle(ineq_A, ineq_B, mu_w,
+                                                  cov_w)
+        invR = np.linalg.inv(R)
+
+        Phi = E_0(lower, mu_, cov_)
+        Phi1 = E_X(lower, cov_)
+        Phi2 = E_XXT(lower, cov_)
+
+        alpha0 =  Phi
+        alpha1 =  invR.dot(Phi1) + mu_ * Phi
+        alpha2 =  invR.dot(Phi2.dot(invR.T))\
+                +  np.outer(mu_, Phi).dot(invR.T)\
+                +  invR.dot(np.outer(Phi, mu_)) +  np.outer(mu_, mu_) * Phi
+        return alpha0, alpha1, alpha2
+
+    m = cdd.Matrix(np.hstack((ineq_B[:, None], ineq_A)))
+    m.rep_type = cdd.RepType.INEQUALITY
+    v = np.array(cdd.Polyhedron(m).get_generators())[:, 1:]
+
+    for simplex in get_simplices(v):
+        a, signs = simplex_to_cones(v[simplex])
+        for (A, b), sign in zip(a, signs):
+
+            lower, mu_c, cov_c, R = planes_to_rectangle(A, b, mu_w, cov_w)
+            invR = np.linalg.inv(R)
+
+            Phi = E_0(lower, mu_c, cov_c)
+            Phi1 = E_X(lower, cov_c)
+            Phi2 = E_XXT(lower, cov_c)
+
+            alpha0 += sign * Phi
+            alpha1 += sign * invR.dot(Phi1) + sign * mu_c * Phi
+            alpha2 += (invR.dot(Phi2.dot(invR.T))\
+                    + np.outer(mu_c, Phi1).dot(invR.T)\
+                    + invR.dot(np.outer(Phi1, mu_c))\
+                    + np.outer(mu_c, mu_c) * Phi) * sign
+
+    return alpha0, alpha1, alpha2
+
+############################# kappa computations
+def compute_kappa(x, mu_w, cov_w, cov_x, b_w):
+    value = 0.5 * (mu_w * np.linalg.inv(cov_w).dot(mu_w)).sum()\
+            - 0.5 * ((x - b_w) * np.linalg.inv(cov_x).dot(x - b_w)).sum()
+    return np.exp(min(value, 2))
+
+############################## ALGO 2
+def algo2(x, ineq_A, ineq_B, signs, regions, sigma_x, mu_z, sigma_z,
+          get_Ab):
+
+    kappas = []
+    all_As = []
+    all_Bs = []
+    alpha0 = []
+    alpha1 = []
+    alpha2 = []
+    for (indices, flips) in regions:
+        
+        signs_ = np.copy(signs)
+        signs_[indices] *= flips
+
+        A_w, b_w = get_Ab(signs_)
+        all_As.append(A_w)
+        all_Bs.append(b_w)
+
+        mu_w, cov_w = compute_mean_cov(x, A_w, b_w, mu_z, sigma_z, sigma_x)
+     
+        alphas = compute_alphas(ineq_A[indices], ineq_B[indices],
+                                signs[indices] * flips, x, mu_w, cov_w)
+        alpha0.append(alphas[0])
+        alpha1.append(alphas[1])
+        alpha2.append(alphas[2])
+    
+        kappas.append(compute_kappa(x, mu_w, cov_w, sigma_x, b_w))
+
+    kappas = np.nan_to_num(np.array(kappas))
+    alpha0 = np.array(alpha0)
+    alpha1 = np.array(alpha1)
+    alpha2 = np.array(alpha2)
+
+    renorm = kappas / (kappas * alpha0).sum()
+    m0_w = alpha0 * renorm
+    m1_w = alpha1 * renorm[:, None]
+    m2_w = alpha2 * renorm[:, None, None]
+    m1 = m1_w.sum(0)
+    m2 = m2_w.sum(0)
+    px = np.exp(-0.5 * (mu_z * np.linalg.inv(sigma_z).dot(mu_z)).sum())\
+            * ((2*np.pi) ** (len(mu_z) + len(x))\
+            * np.linalg.det(sigma_z) * np.linalg.det(sigma_x))**-0.5\
+            * (kappas * alpha0).sum()
+    return px, m1, m2, m0_w, m1_w, m2_w
+
+
+
+############################# evidence
 
