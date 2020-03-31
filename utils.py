@@ -5,10 +5,74 @@ import itertools
 from scipy.spatial import ConvexHull, Delaunay
 from numpy.linalg import lstsq
 from tqdm import tqdm
-
-
+import symjax as sj
+import symjax.tensor as T
 VERBOSE = 0
 
+def create_fns(input, in_signs, Ds):
+
+    cumulative_units = np.concatenate([[0], np.cumsum(Ds[:-1])])
+    
+    Ws = [sj.initializers.he((j, i))/1 for j, i in zip(Ds[1:], Ds[:-1])]
+    bs = [sj.initializers.he((j,))/3 for j in Ds[1:]]
+
+    A_w = [T.eye(Ds[0])]
+    B_w = [T.zeros(Ds[0])]
+    
+    A_q = [T.eye(Ds[0])]
+    B_q = [T.zeros(Ds[0])]
+    
+    maps = [input]
+    signs = []
+    masks = [T.ones(Ds[0])]
+    in_masks = T.where(T.concatenate([T.ones(Ds[0]), in_signs]) > 0, 1.,
+                                     0.3)
+
+    for w, b in zip(Ws[:-1], bs[:-1]):
+        
+        pre_activation = T.matmul(w, maps[-1]) + b
+        signs.append(T.sign(pre_activation))
+        masks.append(T.where(pre_activation > 0, 1., 0.3))
+
+        maps.append(pre_activation * masks[-1])
+
+    maps.append(T.matmul(Ws[-1], maps[-1]) + bs[-1])
+
+    # compute per region A and B
+    for start, end, w, b, m in zip(cumulative_units[:-1],
+                                   cumulative_units[1:], Ws, bs, masks):
+
+        A_w.append(T.matmul(w * m, A_w[-1]))
+        B_w.append(T.matmul(w * m, B_w[-1]) + b)
+
+        A_q.append(T.matmul(w * in_masks[start:end], A_q[-1]))
+        B_q.append(T.matmul(w * in_masks[start:end], B_q[-1]) + b)
+
+    signs = T.concatenate(signs)
+    ineq_b = T.concatenate(B_w[1:-1])
+    ineq_A = T.vstack(A_w[1:-1])
+
+    inequalities = T.hstack([ineq_b[:, None], ineq_A])
+    inequalities = inequalities * signs[:, None] / T.linalg.norm(ineq_A, 2,
+                                                         1, keepdims=True)
+
+    inequalities_code = T.hstack([T.concatenate(B_q[1:-1])[:, None],
+                                  T.vstack(A_q[1:-1])])
+    inequalities_code = inequalities_code * in_signs[:, None]
+
+    f = sj.function(input, outputs=[maps[-1], A_w[-1], B_w[-1],
+                                    inequalities, signs])
+    g = sj.function(in_signs, outputs=[A_q[-1], B_q[-1]])
+    all_g = sj.function(in_signs, outputs=inequalities_code)
+    h = sj.function(input, outputs=maps[-1])
+
+    return f, g, h, all_g
+
+
+
+def lse(x):
+    x_max = x.max()
+    return np.log(np.sum(np.exp(x - x_max))) + x_max
 
 def find_region(x, regions, f):
     x_signs = []
@@ -16,7 +80,13 @@ def find_region(x, regions, f):
         x_signs.append(f(x_)[-1])
     x_signs = np.array(x_signs)
 
-    return np.equal(x_signs[:, None, :], regions).prod(2).argmax(1)
+    return np.equal(x_signs[:, None, :], np.array(list(regions.keys()))).prod(2).argmax(1)
+
+def in_region(x, ineq_A, ineq_B):
+    if ineq_A is None:
+        return np.ones(x.shape[0]).astype('bool')
+    return (np.dot(x, ineq_A.T) + ineq_B >= 0).prod(1)
+
 
 
 def get_simplices(vertices):  
@@ -25,20 +95,21 @@ def get_simplices(vertices):
 
     vertices: array of shape (V, D) with V the number of vertices
     """
+    if vertices.shape[1] == 1:
+        assert vertices.shape[0] == 2
+        return [[0, 1]]
     return Delaunay(vertices).simplices
 
-def one_step(M):
-    A = np.vstack((M, np.random.rand(M.shape[1])))
-    b = np.zeros(A.shape[0])
-    b[-1] = 1
-    vec = lstsq(A, b, rcond=None)[0]
-    return np.vstack((M, vec / np.linalg.norm(vec, 2)))
 
 def create_H(M):
-    K = M.shape[0]
-    for i in range(M.shape[1]-M.shape[0]):
-        M = one_step(M)
-    return M[K:]
+    K, D = M.shape
+    A = np.copy(M)
+    for i in range(D - K):
+        A, b = np.vstack((A, np.random.rand(D))), np.zeros(K + 1 + i)
+        b[-1] = 1
+        vec = lstsq(A, b, rcond=None)[0]
+        A[-1] = vec / np.linalg.norm(vec, 2)
+    return A[K:]
 
 
 def flip(A, i):
@@ -47,34 +118,44 @@ def flip(A, i):
         sign = sign[:, None]
     return A * sign
 
-def arreq_in_list(myarr, list_arrays):
-    return next((True for elem in list_arrays if np.array_equal(elem, myarr)), False)
 
 
-def search_region(all_g, S, signs):
-
-    if arreq_in_list(signs, S):
-        return
-
-    S.append(signs)
+def find_neighbours(all_g, signs):
     ineq = all_g(signs)
 
-    I = cdd.Matrix(np.hstack([ineq[:, [0]], ineq[:, 1:]]))
-    I.rep_type = cdd.RepType.INEQUALITY 
-    I = list(set(range(len(signs))) - set(I.canonicalize()[1]))
-    M = np.ones((len(I), len(signs)))
-    M[np.arange(len(I)), I] = -1
-    for m in M:
-        search_region(all_g, S, signs * m)
+    M = cdd.Matrix(np.hstack([ineq[:, [0]], ineq[:, 1:]]))
+    M.rep_type = cdd.RepType.INEQUALITY
+    redundant = set(M.canonicalize()[1])
+    I = list(set(range(len(signs))) - redundant)
+    F = np.ones((len(I), len(signs)))
+    F[np.arange(len(I)), I] = -1
+    return F * signs, np.array(M)
 
 
 
-def get_vertices(inequalitites):
+def search_region(all_g, signs, max_depth=9999999999999):
+    S = dict()
+    parents=[signs]
+    for d in range(max_depth+1):
+        if len(parents) == 0:
+            return S
+        children = []
+        for s in parents:
+            neighbours, M = find_neighbours(all_g, s)
+            S[tuple(s)] = M
+            for n in neighbours:
+                if tuple(n) not in S:
+                    children.append(n)
+        parents = children
+    return S
+
+
+def get_vertices(inequalities):
     # create the matrix the inequalities are a matrix of the form
     # [b, -A] from b-Ax>=0
     m = cdd.Matrix(inequalities)
     m.rep_type = cdd.RepType.INEQUALITY
-    return m.get_generators()
+    return cdd.Polyhedron(m).get_generators()
 
 
 def univariate_gaussian_integral(low, high, mu, cov):
@@ -127,7 +208,8 @@ def mvstdnormcdf(lower, cov):
 
 def F(x, sigma, a, mu, cov):
     value = multivariate_normal.pdf(x, cov=sigma)
-    value *= mvstdnormcdf(a-mu, cov)
+    if len(cov):
+        value *= mvstdnormcdf(a-mu, cov)
     return value
 
 
@@ -243,95 +325,98 @@ def planes_to_rectangle(A, b, mu, cov):
 
 
 def simplex_to_cones(vertices):
+    S = len(vertices[0])
     m = cdd.Matrix(np.hstack([np.ones((len(vertices), 1)), vertices]))
     m.rep_type = cdd.RepType.GENERATOR
     v = np.array(cdd.Polyhedron(m).get_inequalities())
-    A, b = v[:, 1:], -v[:, 0]
+    A, b = v[:, 1:], v[:, 0]
     K = A.shape[0]
 
     subsets = set()
     for n in range(1, K):
         subsets = subsets.union(set(itertools.combinations(set(range(K)), n)))
     F = len(vertices)
-    signs = [(-1)**(F + 1)] + [(-1)**(len(J)+F+1) for J in subsets]
+    signs = [(-1)**S] + [(-1)**(len(J) + S) for J in subsets]
     sets = [(None, None)] + [(A[list(indices)], b[list(indices)])
             for indices in subsets]
     return sets, signs
 
 
 
-def compute_mean_cov(x, A_w, b_w, mu_z, Sigma_z, Sigma_x):
+def compute_mean_cov(x, A_w, b_w, mu_z, sigma_z, sigma_x):
 
     if len(x) > 1:
-        inv_Sigma_x = np.linalg.inv(Sigma_x)
-        inv_Sigma_z = np.linalg.inv(Sigma_z)
+        inv_sigma_x = np.linalg.inv(sigma_x)
+        inv_sigma_z = np.linalg.inv(sigma_z)
     else:
-        inv_Sigma_x = 1/Sigma_x
-        inv_Sigma_z = 1/Sigma_z
+        inv_sigma_x = 1/sigma_x
+        inv_sigma_z = 1/sigma_z
  
-    inv_sigma_w = inv_Sigma_z + A_w.T.dot(inv_Sigma_x.dot(A_w))
-    mu_w = inv_sigma_w.dot(A_w.T.dot(inv_Sigma_x.dot(x - b_w))\
-                                     + inv_Sigma_z.dot(mu_z))
+    inv_sigma_w = inv_sigma_z + A_w.T.dot(inv_sigma_x.dot(A_w))
+    mu_w = inv_sigma_w.dot(A_w.T.dot(inv_sigma_x.dot(x - b_w))\
+                                     + inv_sigma_z.dot(mu_z))
     if len(x) > 1:
         sigma_w = np.linalg.inv(inv_sigma_w)
     else:
         sigma_w = 1/inv_sigma_w
-    print('musigma', mu_w, inv_sigma_w, A_w, b_w, x - b_w)
     return mu_w, sigma_w
 
 ############################# alpha computations
-def compute_alphas(ineq_A, ineq_B, signs, x, mu_w, cov_w):
+def compute_alphas(ineqs, x, mu_w, sigma_w):
+
+    if ineqs.shape[0] <= len(x):
+        lower, mu_, cov_, R = planes_to_rectangle(ineqs[:, 1:], ineqs[:, 0],
+                                                   mu_w, sigma_w)
+        invR = np.linalg.inv(R)
+
+        const = (2 * np.pi)**(len(x)/2) * np.sqrt(np.abs(np.linalg.det(cov_)))
+        Phi = E_0(lower, mu_, cov_) * const
+        Phi1 = E_X(lower, cov_) * const
+        Phi2 = E_XXT(lower, cov_) * const
+
+        alpha1 =  invR.dot(Phi1) + mu_ * Phi
+        alpha2 =  invR.dot(Phi2.dot(invR.T))\
+                +  np.outer(mu_, Phi1).dot(invR.T)\
+                +  invR.dot(np.outer(Phi1, mu_)) +  np.outer(mu_, mu_) * Phi
+        return Phi, alpha1, alpha2
 
     alpha0 = 0.
     alpha1 = 0.
     alpha2 = 0.
 
-    if len(ineq_B) < len(x):
-        lower, mu_, cov_, R = planes_to_rectangle(ineq_A, ineq_B, mu_w,
-                                                  cov_w)
-        invR = np.linalg.inv(R)
 
-        Phi = E_0(lower, mu_, cov_)
-        Phi1 = E_X(lower, cov_)
-        Phi2 = E_XXT(lower, cov_)
-
-        alpha0 =  Phi
-        alpha1 =  invR.dot(Phi1) + mu_ * Phi
-        alpha2 =  invR.dot(Phi2.dot(invR.T))\
-                +  np.outer(mu_, Phi).dot(invR.T)\
-                +  invR.dot(np.outer(Phi, mu_)) +  np.outer(mu_, mu_) * Phi
-        return alpha0, alpha1, alpha2
-
-    m = cdd.Matrix(np.hstack((ineq_B[:, None], ineq_A)))
-    m.rep_type = cdd.RepType.INEQUALITY
-    v = np.array(cdd.Polyhedron(m).get_generators())[:, 1:]
+    v = np.array(get_vertices(ineqs))[:, 1:]
 
     for simplex in get_simplices(v):
         a, signs = simplex_to_cones(v[simplex])
         for (A, b), sign in zip(a, signs):
 
-            lower, mu_c, cov_c, R = planes_to_rectangle(A, b, mu_w, cov_w)
+            lower, mu_c, cov_c, R = planes_to_rectangle(A, b, mu_w, sigma_w)
             invR = np.linalg.inv(R)
+            const = (2 * np.pi)**(len(x)/2) * np.sqrt(np.abs(np.linalg.det(cov_c)))
 
-            Phi = E_0(lower, mu_c, cov_c)
-            Phi1 = E_X(lower, cov_c)
-            Phi2 = E_XXT(lower, cov_c)
-
+            Phi = E_0(lower, mu_c, cov_c) * const
+            print('PHI', sign, E_0(lower, mu_c, cov_c), const)
+            Phi1 = E_X(lower, cov_c) * const
+            Phi2 = E_XXT(lower, cov_c) * const
             alpha0 += sign * Phi
-            alpha1 += sign * invR.dot(Phi1) + sign * mu_c * Phi
+            alpha1 += sign * (invR.dot(Phi1) + mu_c * Phi)
             alpha2 += (invR.dot(Phi2.dot(invR.T))\
                     + np.outer(mu_c, Phi1).dot(invR.T)\
                     + invR.dot(np.outer(Phi1, mu_c))\
                     + np.outer(mu_c, mu_c) * Phi) * sign
-
+    print('TOTAL', alpha0)
     return alpha0, alpha1, alpha2
 
 ############################# kappa computations
-def compute_kappa(x, mu_w, cov_w, cov_x, b_w):
-    value = 0.5 * (mu_w * np.linalg.inv(cov_w).dot(mu_w)).sum()\
-            - 0.5 * ((x - b_w) * np.linalg.inv(cov_x).dot(x - b_w)).sum()
-    print((x - b_w), mu_w, np.linalg.inv(cov_w))
-    return np.exp(value)
+def compute_log_kappa(x, mu_w, sigma_w, sigma_x, b_w):
+    value = mu_w.dot(np.linalg.inv(sigma_w).dot(mu_w))
+    value -=(x - b_w).dot(np.linalg.inv(sigma_x).dot(x - b_w))
+#    print('------ - - - - KAPPA')
+#    print('x-b_w', x - b_w, '\nmu_w', mu_w, '\ninv_sigma_w', 
+#            np.linalg.inv(sigma_w))
+#    print('value=', value)
+    return 0.5 * value
 
 ############################# get all A,B
 def get_AB(ineq_A, ineq_B, signs, regions, get_Ab):
@@ -355,50 +440,54 @@ def get_AB(ineq_A, ineq_B, signs, regions, get_Ab):
 
 
 ############################## ALGO 2
-def algo2(x, ineq_A, ineq_B, signs, regions, sigma_x, mu_z, sigma_z,
-          get_Ab):
+def algo2(x, regions, sigma_x, mu_z, sigma_z,
+          get_Ab, get_ineq):
 
     kappas = []
-    all_As = []
-    all_Bs = []
+#    all_As = []
+#    all_Bs = []
     alpha0 = []
     alpha1 = []
     alpha2 = []
-    for (indices, flips) in regions:
+
+    for flips in regions.keys():
         
-        signs_ = np.copy(signs)
-        signs_[indices] *= flips
+        A_w, b_w = get_Ab(np.array(flips))
 
-        A_w, b_w = get_Ab(signs_)
-        all_As.append(A_w)
-        all_Bs.append(b_w)
+#        all_As.append(A_w)
+#        all_Bs.append(b_w)
 
-        mu_w, cov_w = compute_mean_cov(x, A_w, b_w, mu_z, sigma_z, sigma_x)
+        mu_w, sigma_w = compute_mean_cov(x=x, A_w=A_w, b_w=b_w, mu_z=mu_z,
+                                       sigma_z=sigma_z, sigma_x=sigma_x)
      
-        alphas = compute_alphas(ineq_A[indices], ineq_B[indices],
-                                signs[indices] * flips, x, mu_w, cov_w)
+        alphas = compute_alphas(regions[flips], x=x, mu_w=mu_w, sigma_w=sigma_w)
+
         alpha0.append(alphas[0])
         alpha1.append(alphas[1])
         alpha2.append(alphas[2])
     
-        kappas.append(compute_kappa(x, mu_w, cov_w, sigma_x, b_w))
-        print(kappas[-1], alpha0[-1])
+        kappas.append(compute_log_kappa(x, mu_w=mu_w, sigma_w=sigma_w,
+                                        sigma_x=sigma_x, b_w=b_w))
 
     kappas = np.nan_to_num(np.array(kappas))
     alpha0 = np.array(alpha0)
     alpha1 = np.array(alpha1)
     alpha2 = np.array(alpha2)
-
     renorm = kappas / (kappas * alpha0).sum()
     m0_w = alpha0 * renorm
     m1_w = alpha1 * renorm[:, None]
     m2_w = alpha2 * renorm[:, None, None]
     m1 = m1_w.sum(0)
     m2 = m2_w.sum(0)
-    px = np.exp(-0.5 * (mu_z * np.linalg.inv(sigma_z).dot(mu_z)).sum())\
-            * ((2*np.pi) ** (len(mu_z) + len(x))\
-            * np.linalg.det(sigma_z) * np.linalg.det(sigma_x))**-0.5\
-            * (kappas * alpha0).sum()
+    print(alpha0)
+    px = -0.5 * (mu_z * np.linalg.inv(sigma_z).dot(mu_z)).sum()\
+            - 0.5 * np.log((2*np.pi) ** (len(mu_z) + len(x))\
+            * np.abs(np.linalg.det(sigma_z) * np.linalg.det(sigma_x)))
+    try:
+        px += lse(kappas[alpha0 > 1e-7] + np.log(alpha0[alpha0 > 1e-7]))
+    except:
+        px = 0
+#    ps = 
     return px, m1, m2, m0_w, m1_w, m2_w
 
 
