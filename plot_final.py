@@ -91,7 +91,7 @@ xx = np.vstack([X.flatten(), Y.flatten()]).T
 
 
 ############################################################
-regions = utils.search_region(all_g, signs)
+regions = utils.search_region(all_g, g, signs)
 ds = [0, 1, 2, 3, 4]
 
 grey = matplotlib.cm.get_cmap('gray')
@@ -102,15 +102,15 @@ FINAL = np.zeros(len(xx))
 fig = plt.figure(figsize=(len(ds)*4, 4.2))
 
 for k, d in enumerate(ds):
-    dregions.append(utils.search_region(all_g, signs, max_depth=ds[k]))
+    dregions.append(utils.search_region(all_g, g, signs, max_depth=ds[k]))
  
     ax = plt.subplot(1, len(ds) + 1, 2 + k)
     final = np.zeros(len(xx))
     if k > 0: 
         label = 'Step '+str(k)
         for sign in dregions[-1].keys()-dregions[-2].keys():
-            M = dregions[-1][sign]
-            final += utils.in_region(xx, M[:, 1:], M[:, 0]).astype('float32') 
+            M = dregions[-1][sign]['ineq']
+            final += utils.in_region(xx, M).astype('float32') 
         FINAL += final*(k+1)
         ax.imshow(final.reshape((K, K))*(k+1), vmin=0., vmax=len(ds),
                    extent=[-2, 2, -2, 2], cmap=cmap, norm=norm, origin='lower')
@@ -118,15 +118,15 @@ for k, d in enumerate(ds):
         plt.yticks([])
     else:
         label = 'Init.'
-        for M in list(dregions[-1].values()):
-            final += utils.in_region(xx, M[:, 1:], M[:, 0]).astype('float32')
+        for M in dregions[-1]:
+            final += utils.in_region(xx, dregions[-1][M]['ineq']).astype('float32')
         FINAL += final*(k+1)
         ax.imshow(final.reshape((K, K))*(k+1), vmin=0., vmax=len(ds),
                    extent=[-2, 2, -2, 2], cmap=cmap, norm=norm, origin='lower')
         plt.xticks([])
         plt.yticks([])
-    for M in list(dregions[-1].values()):
-        final = utils.in_region(xx, M[:, 1:], M[:, 0]).astype('float32')
+    for M in dregions[-1]:
+        final = utils.in_region(xx, dregions[-1][M]['ineq']).astype('float32')
         ax.tricontour(xx[:,0], xx[:,1], final-0.5, levels=[0], linewidths=2)
     
     element = Line2D([0], [0], color=cmap(norm(d+1)), lw=9, label=label)
@@ -139,8 +139,8 @@ plt.imshow(FINAL.reshape((K, K)), vmin=0., vmax=len(ds),
 plt.yticks([])
 plt.xticks([])
 
-for M in list(regions.values()):
-    final = utils.in_region(xx, M[:, 1:], M[:, 0]).astype('float32')
+for M in regions:
+    final = utils.in_region(xx, regions[M]['ineq']).astype('float32')
     plt.tricontour(xx[:,0], xx[:,1], final-0.5, levels=[0], linewidths=2)
 
 plt.tight_layout()

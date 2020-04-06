@@ -3,31 +3,34 @@ import cdd
 import matplotlib.pyplot as plt
 import utils
 
-# toy example
-#m = cdd.Matrix([[0, 1., 0], [2, -1., 0], [2, 0., -1.], [0, 0, 1.]])
-#m = cdd.Matrix([[1, -1., 1], [1, 1., -1], [1, -1., -1.], [1, 1, 1.]])
-m = cdd.Matrix([[20, 1., 0], [20, -1., 0], [20, 0., -1.], [20, 0, 1.]])
-m = cdd.Matrix([[200, 1., 0, 0], [200, -1., 0, 0], [200, 0., -1., 0],
-                [200, 0, 1., 0], [200., 0., 0, 1], [200, 0, 0, -1]])
+
+mu = np.zeros(2) + 1
+cov = np.eye(2)
+
+
+m = cdd.Matrix([[30, 1., 0], [30, 0., 1.]])
+print(utils.get_vertices(np.array(m)))
 m.rep_type = cdd.RepType.INEQUALITY
-p = cdd.Polyhedron(m)
-v = np.array(p.get_generators())[:, 1:]
+print(utils.phis_w(np.array(m), mu, cov))
+print('\n\n\n')
 
-accR = 0.
-V = 0.
-mu = np.ones(3) * 0
-cov = 2*np.eye(3) + (np.eye(3)*0.1)[:, ::-1]
+m = cdd.Matrix([[40, 0., 1], [40, -1., 0], [40, 1., -1.]])
+print(utils.get_vertices(np.array(m)))
+m.rep_type = cdd.RepType.INEQUALITY
+print(utils.phis_w(np.array(m), mu, cov))
+print('\n\n\n')
+
+m = cdd.Matrix([[40, 1., 0], [40, -1., 0], [40, 0., -1.], [40, 0, 1.]])
+print(utils.get_vertices(np.array(m)))
+m.rep_type = cdd.RepType.INEQUALITY
+print(utils.phis_w(np.array(m), mu, cov))
+print('\n\n\n')
+
+m = cdd.Matrix([[40, 1., 0], [40, -1., 0], [40, 0., -1.], [40, 0, 1.],
+                [40, 1., 1], [40, -1, -1]])
+print(utils.get_vertices(np.array(m)))
+m.rep_type = cdd.RepType.INEQUALITY
+print(utils.phis_w(np.array(m), mu, cov))
+print('\n\n\n')
 
 
-for simplex in utils.get_simplices(v):
-    a, s = utils.simplex_to_cones(v[simplex])
-    for (A, b), ss in zip(a, s):
-        lower, mu_, cov_, R = utils.planes_to_rectangle(A, b, mu, cov)
-        invR = np.linalg.inv(R)
-        value = invR.dot(utils.E_Y(lower, mu_, cov_))
-        value_ = invR.dot(utils.E_YYT(lower, mu_, cov_).dot(invR.T))
-        value2 = utils.E_1(lower - mu_, cov_)
-        accR += ss * value_
-        V += ss * value2
-
-print('R', accR/V)
