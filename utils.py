@@ -10,15 +10,22 @@ from numpy.linalg import lstsq
 from tqdm import tqdm
 import symjax as sj
 import symjax.tensor as T
+from multiprocessing import Pool, Array
+
+import networks
+
 VERBOSE = 0
 
 
-def create_fns(input, in_signs, Ds, alpha=0.1):
+def create_fns(input, in_signs, Ds, x, m0, m1, m2, batch_in_signs, alpha=0.1,
+                sigma=1, sigma_x=1, lr=0.0002):
 
     cumulative_units = np.concatenate([[0], np.cumsum(Ds[:-1])])
-    
-    Ws = [sj.initializers.glorot((j, i)) for j, i in zip(Ds[1:], Ds[:-1])]
-    bs = [sj.initializers.he((j,)) for j in Ds[1:-1]] + [T.zeros((Ds[-1],))]
+    BS = batch_in_signs.shape[0]
+    Ws = [T.Variable(sj.initializers.glorot((j, i)) * sigma)
+                    for j, i in zip(Ds[1:], Ds[:-1])]
+    bs = [T.Variable(sj.initializers.he((j,)) * sigma) for j in Ds[1:-1]]\
+                + [T.Variable(T.zeros((Ds[-1],)))]
 
     A_w = [T.eye(Ds[0])]
     B_w = [T.zeros(Ds[0])]
@@ -26,10 +33,16 @@ def create_fns(input, in_signs, Ds, alpha=0.1):
     A_q = [T.eye(Ds[0])]
     B_q = [T.zeros(Ds[0])]
     
+    batch_A_q = [T.eye(Ds[0]) * T.ones((BS, 1, 1))]
+    batch_B_q = [T.zeros((BS, Ds[0]))]
+    
     maps = [input]
     signs = []
     masks = [T.ones(Ds[0])]
+
     in_masks = T.where(T.concatenate([T.ones(Ds[0]), in_signs]) > 0, 1., alpha)
+    batch_in_masks = T.where(T.concatenate([T.ones((BS, Ds[0])),
+                                            batch_in_signs], 1) > 0, 1., alpha)
 
     for w, b in zip(Ws[:-1], bs[:-1]):
         
@@ -51,6 +64,14 @@ def create_fns(input, in_signs, Ds, alpha=0.1):
         A_q.append(T.matmul(w * in_masks[start:end], A_q[-1]))
         B_q.append(T.matmul(w * in_masks[start:end], B_q[-1]) + b)
 
+        batch_A_q.append(T.matmul(w * batch_in_masks[:, None, start:end],
+                                  batch_A_q[-1]))
+        batch_B_q.append((w * batch_in_masks[:, None, start:end]\
+                            * batch_B_q[-1][:, None, :]).sum(2) + b)
+
+    batch_B_q = batch_B_q[-1]
+    batch_A_q = batch_A_q[-1]
+
     signs = T.concatenate(signs)
 
     inequalities = T.hstack([T.concatenate(B_w[1:-1])[:, None],
@@ -59,13 +80,36 @@ def create_fns(input, in_signs, Ds, alpha=0.1):
     inequalities_code = T.hstack([T.concatenate(B_q[1:-1])[:, None],
                                   T.vstack(A_q[1:-1])]) * in_signs[:, None]
 
+    #### loss
+    log_sigma2 = T.Variable(sigma_x)
+    sigma2 = T.exp(log_sigma2)
+
+    Am1 = T.einsum('qds,nqs->nqd', batch_A_q, m1)
+    Bm0 = T.einsum('qd,nq->nd', batch_B_q, m0)
+    B2m0 = T.einsum('nq,qd->n', m0, batch_B_q**2)
+    AAm2 = T.einsum('qds,qdu,nqup->nsp', batch_A_q, batch_A_q, m2)
+    
+    inner = - (x * (Am1.sum(1) + Bm0)).sum(1) + (Am1 * batch_B_q).sum((1, 2))
+
+    loss_2 = (x ** 2).sum(1) + B2m0 + T.trace(AAm2, axis1=1, axis2=2).squeeze()
+
+    loss_z = T.trace(m2.sum(1), axis1=1, axis2=2).squeeze()
+
+    cst = 0.5 * (Ds[0] + Ds[-1]) * T.log(2 * np.pi)
+
+    loss = cst + 0.5 * Ds[-1] * log_sigma2 + inner / sigma2\
+            + 0.5 * loss_2 / sigma2 + 0.5*loss_z
+
+    mean_loss = loss.mean()
+    adam = sj.optimizers.NesterovMomentum(mean_loss, Ws + bs, lr, 0.9)
+
+    train_f = sj.function(batch_in_signs, x, m0, m1, m2, outputs=mean_loss, updates=adam.updates)
     f = sj.function(input, outputs=[maps[-1], A_w[-1], B_w[-1],
                                     inequalities, signs])
     g = sj.function(in_signs, outputs=[A_q[-1], B_q[-1]])
     all_g = sj.function(in_signs, outputs=inequalities_code)
     h = sj.function(input, outputs=maps[-1])
-
-    return f, g, h, all_g
+    return f, g, h, all_g, train_f, sigma2
 
 
 def lse(x):
@@ -124,9 +168,9 @@ def flip(A, i):
 
 
 
-def find_neighbours(all_g, signs):
+def find_neighbours(signs2q, signs):
 
-    ineq = all_g(np.array(signs))
+    ineq = signs2q(np.array(signs))
 
     M = cdd.Matrix(np.hstack([ineq[:, [0]], ineq[:, 1:]]))
     M.rep_type = cdd.RepType.INEQUALITY
@@ -138,7 +182,7 @@ def find_neighbours(all_g, signs):
 
 
 
-def search_region(all_g, get_Ab, signs, max_depth=9999999999999):
+def search_region(signs2q, signs2Ab, signs, max_depth=9999999999999):
     S = dict()
     parents=[signs]
     for d in range(max_depth+1):
@@ -146,8 +190,8 @@ def search_region(all_g, get_Ab, signs, max_depth=9999999999999):
             return S
         children = []
         for s in parents:
-            neighbours, M = find_neighbours(all_g, s)
-            A_w, b_w = get_Ab(s)
+            neighbours, M = find_neighbours(signs2q, s)
+            A_w, b_w = signs2Ab(s)
             S[tuple(s)] = {'ineq': M, 'Ab': (A_w, b_w)}
             for n in neighbours:
                 if tuple(n) not in S:
@@ -290,7 +334,7 @@ def cones_to_rectangle(ineqs, mu, cov):
 
     # first the general case without constraints
     if ineqs is None:
-        lower = np.array([-np.inf] * len(mu))
+        lower = np.array([-np.inf] * len(cov))
         return lower, cov, np.eye(len(lower))
 
     ineqs /= np.linalg.norm(ineqs[:, 1:], 2, 1, keepdims=True)
@@ -302,7 +346,10 @@ def cones_to_rectangle(ineqs, mu, cov):
     else:
         R = np.vstack([A, create_H(A).dot(np.linalg.inv(cov))])
     b = np.concatenate([b, np.array([-np.inf] * D)])
-    l_c = b - R.dot(mu)
+    if mu.ndim == 1:
+        l_c = b - R.dot(mu)
+    elif mu.ndim == 2:
+        l_c = b - np.einsum('sd,nd->ns',R, mu)
     cov_c = R.dot(cov.dot(R.T))
     
     return l_c, cov_c, R
@@ -331,42 +378,26 @@ def simplex_to_cones(vertices):
 #######################################################
 
 
-def mu_sigma_all(x, A_w, b_w, sigma_z, sigma_x):
+def mu_sigma(x, A, b, sigma_z, sigma_x):
+    x_ = x[None, :] if x.ndim == 1 else x
 
-    if len(x) > 1:
-        inv_sigma_x = np.linalg.inv(sigma_x)
-        inv_sigma_z = np.linalg.inv(sigma_z)
+    inv_sigma_x = np.linalg.inv(sigma_x) if x_.shape[1] > 1 else 1/sigma_x
+    inv_sigma_z = np.linalg.inv(sigma_z) if x_.shape[1] > 1 else 1/sigma_z
+
+    if A.ndim == 3:
+        isigma_w = inv_sigma_z + np.einsum('nds,dk,nkz->nsz',A, inv_sigma_x, A)
     else:
-        inv_sigma_x = 1/sigma_x
-        inv_sigma_z = 1/sigma_z
- 
-    inv_sigma_w = inv_sigma_z + np.einsum('nds,dk,nkz->nsz',A_w,
-                                          inv_sigma_x, A_w)
-    if len(x) > 1:
-        sigma_w = np.linalg.inv(inv_sigma_w)
+        isigma_w = inv_sigma_z + A.T.dot(inv_sigma_x.dot(A))
+    sigma_w = np.linalg.inv(isigma_w) if isigma_w.ndim > 1 else 1/isigma_w
+    
+    if A.ndim == 3:
+        mu_w = np.einsum('nsk,Nnk->Nns', sigma_w, np.einsum('nds,dk,Nnk->Nns',
+                                        A, inv_sigma_x, x_[:, None, :] - b))
     else:
-        sigma_w = 1/inv_sigma_w
-    mu_w = np.einsum('nsk,nk->ns', sigma_w,
-                    np.einsum('nds,dk,nk->ns',A_w, inv_sigma_x, x - b_w))
-
-    return mu_w, sigma_w
-
-
-def mu_sigma_w(x, A_w, b_w, sigma_z, sigma_x):
-
-    if len(x) > 1:
-        inv_sigma_x = np.linalg.inv(sigma_x)
-        inv_sigma_z = np.linalg.inv(sigma_z)
-    else:
-        inv_sigma_x = 1/sigma_x
-        inv_sigma_z = 1/sigma_z
- 
-    inv_sigma_w = inv_sigma_z + A_w.T.dot(inv_sigma_x.dot(A_w))
-    if len(x) > 1:
-        sigma_w = np.linalg.inv(inv_sigma_w)
-    else:
-        sigma_w = 1/inv_sigma_w
-    mu_w = sigma_w.dot(A_w.T.dot(inv_sigma_x.dot(x - b_w)))
+        mu_w = np.einsum('sk,Nk->Ns', sigma_w, np.einsum('ds,dk,Nk->Ns',
+                                    A, inv_sigma_x, x_[:, None, :] - b))
+    mu_w = mu_w[0] if x.ndim == 1 else mu_w
+    
     return mu_w, sigma_w
 
 
@@ -418,6 +449,8 @@ def phis_all(ineqs, mu_all, sigma_all):
     Phi0_all = []
     Phi1_all = []
     Phi2_all = []
+    if mu_all.ndim == 3:
+        mu_all = mu_all.transpose((1, 0, 2))
     for ineq, mu, sigma in zip(ineqs, mu_all, sigma_all):
         out = phis_w(ineq, mu, sigma)
         Phi0_all.append(out[0])
@@ -428,85 +461,61 @@ def phis_all(ineqs, mu_all, sigma_all):
 
 ############################# kappa computations
 
-def log_kappa_w(x, sigma_x, sigma_z, sigma_w, A_w, b_w):
-    cov = sigma_x + A_w.dot(sigma_z.dot(A_w.T))
-    det_w = np.linalg.det(sigma_w)
-    det_s = np.linalg.det(cov)
-    value = multivariate_normal.logpdf(x, mean=b_w, cov=cov)
-    return 0.5*(np.log(det_w)+np.log(det_s)) + value
+def log_kappa(x, sigma_x, sigma_z, A, b):
+    if b.ndim == 1:
+        cov = sigma_x + np.einsum('ds,sp,kp->dk',A, sigma_z, A)
+        return multivariate_normal.logpdf(x, mean=b, cov=cov)
 
-
-def log_kappa_all(x, sigma_x, sigma_z, sigma_all, A_all, b_all):
-    kappas = list()
-    for sigma, A, b in zip(sigma_all, A_all, b_all):
-        kappas.append(log_kappa_w(x, sigma_x, sigma_z, sigma, A, b))
-    return np.array(kappas)
+    cov = sigma_x + np.einsum('nds,sp,nkp->ndk',A, sigma_z, A)
+    kappas = np.array([multivariate_normal.logpdf(x, mean=d, cov=c)
+                       for d, c in zip(b, cov)])
+    if kappas.ndim == 2:
+        return kappas.transpose((1, 0))
+    return kappas
 
 
 ##################################
-def posterior(z, regions, x, As, Bs, mu_z, sigma_z, sigma_x):
-    mus, sigmas = mu_sigma_all(x, As, Bs, sigma_z, sigma_x)
-    kappas = log_kappa_all(x, sigma_x, sigma_z, sigmas, As, Bs)
+def posterior(z, regions, x, As, Bs, sigma_z, sigma_x):
+    mus, sigmas = mu_sigma(x, As, Bs, sigma_z, sigma_x)
+    kappas = np.exp(log_kappa(x, sigma_x, sigma_z, As, Bs))
     phis = phis_all([regions[r]['ineq'] for r in regions], mus, sigmas)
 
-    w = phis[0] > 0
-    c = kappas - lse(kappas[w] * np.log(phis[0][w]))
     output = np.zeros(len(z))
     for k, r in enumerate(regions):
         w = in_region(z, regions[r]['ineq'])
-        output[w] = c[k] + multivariate_normal.logpdf(z[w], mean=mus[k],
+        output[w] = kappas[k] * multivariate_normal.pdf(z[w], mean=mus[k],
                                                       cov=sigmas[k])
+    output /= (kappas * phis[0]).sum()
     return output
 
 
 
 
 ############################## ALGO 2
-def algo2(x, regions, sigma_x, mu_z, sigma_z):
+def marginal_moments(x, regions, sigma_x, sigma_z):
 
-    kappas = []
-    Phis_0 = []
-    Phis_1 = []
-    Phis_2 = []
+    As = np.array([regions[s]['Ab'][0] for s in regions])
+    Bs = np.array([regions[s]['Ab'][1] for s in regions])
 
-    for flips in regions.keys():
-        
-        A_w, b_w = regions[flips]['Ab']
+    mus, sigmas = mu_sigma(x, As, Bs, sigma_z, sigma_x) #(N R D) (R D D)
+    kappas = log_kappa(x, sigma_x, sigma_z, As, Bs) #(N R)
+    ineqs = np.array([regions[r]['ineq'] for r in regions])
+    
+    Phis_0, Phis_1, Phis_2 = phis_all(ineqs, mus, sigmas)
 
-        mu_w, sigma_w = mu_sigma_w(x=x, A_w=A_w, b_w=b_w,
-                                       sigma_z=sigma_z, sigma_x=sigma_x)
-     
-        phis = phis_w(regions[flips]['ineq'], mu_w=mu_w, sigma_w=sigma_w)
-
-        Phis_0.append(phis[0])
-        Phis_1.append(phis[1])
-        Phis_2.append(phis[2])
-        kappas.append(log_kappa_w(x, sigma_x=sigma_x, sigma_z=sigma_z,
-                                  sigma_w=sigma_w, A_w=A_w, b_w=b_w))
-
- 
-    Phis_0 = np.array(Phis_0)
-    Phis_1 = np.array(Phis_1)
-    Phis_2 = np.array(Phis_2)
-    kappas = np.array(kappas)
-
-    mkappa = kappas.max()
-    alphas = np.exp(kappas - mkappa) / (np.exp(kappas - mkappa)\
-                                        * Phis_0).sum()
-
+    px = (1e-25 + np.exp(kappas) * Phis_0).sum()
+    alphas = np.exp(kappas) / px#(1e-18 + np.exp(kappas) * Phis_0).sum()
     m0_w = Phis_0 * alphas
     m1_w = Phis_1 * alphas[:, None]
     m2_w = Phis_2 * alphas[:, None, None]
-    m1 = m1_w.sum(0)
-    m2 = m2_w.sum(0)
-    print('mean', Phis_0.mean())
-    w = Phis_0 > 0
-    px = lse(kappas[w] + np.log(Phis_0[w]))
-    print('px', px)
-    print('alpha, kappa*Phi_w, px')
-    print(alphas[:3].round(2), (kappas * Phis_0)[:3].round(2),
-            np.round(px,2))
-    return px, m1, m2, m0_w, m1_w, m2_w
+
+#    try:
+#    w = Phis_0 > 0
+#    px = lse(kappas[w] + np.log(Phis_0[w]))
+#    except:
+#        px = 0
+    
+    return px, m0_w, m1_w, m2_w
 
 
 
