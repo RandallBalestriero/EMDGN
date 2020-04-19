@@ -9,8 +9,8 @@ import utils
 
 def init_weights(Ds, seed):
     np.random.seed(seed)
-    Ws = [sj.initializers.he((j, i)) * 2 for j, i in zip(Ds[1:], Ds[:-1])]
-    bs = [sj.initializers.he((j,)) * 2 for j in Ds[1:]]
+    Ws = [sj.initializers.glorot((j, i)) for j, i in zip(Ds[1:], Ds[:-1])]
+    bs = [sj.initializers.he((j,)) for j in Ds[1:]]
     return Ws, bs
 
 
@@ -160,9 +160,9 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
     Bm0 = T.einsum('qd,nq->nd', batch_B_q, m0)
     inner = 2 * (ABm1 - x * (Am1 + Bm0))
 
-    AAm2 = T.einsum('qds,qdu,nqup->nsp', batch_A_q, batch_A_q, m2)
+    Am2AT = T.einsum('qds,nqsu,qpu->ndp', batch_A_q, m2, batch_A_q)
     B2m0 = T.einsum('nq,qd->nd', m0, batch_B_q ** 2)
-    squares = x ** 2 + B2m0 + T.diagonal(AAm2, axis1=1, axis2=2)
+    squares = x ** 2 + B2m0 + T.diagonal(Am2AT, axis1=1, axis2=2)
 
     pz = T.diagonal(m2, axis1=2, axis2=3).sum(1)
 
@@ -173,8 +173,8 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
     mean_loss = loss.mean()
     adam = sj.optimizers.NesterovMomentum(mean_loss, Ws + bs, lr, 0.5)
     update_varx =  (inner + squares).mean() * T.ones(Ds[-1])
-    update_varz =  pz.mean() * T.ones(Ds[0])
-    updates = {**adam.updates}#, var_x: update_varx, var_z: update_varz}
+    update_varz =  pz.mean(0) * T.ones(Ds[0])
+    updates = {**adam.updates, var_x: update_varx}
     output = {'train':sj.function(batch_in_signs, x, m0, m1, m2,
                                   outputs=mean_loss, updates=updates),
               'signs2Ab': sj.function(in_signs, outputs=[A_q[-1], B_q[-1]]),

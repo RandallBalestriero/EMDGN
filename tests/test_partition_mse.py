@@ -10,9 +10,9 @@ from tqdm import tqdm
 import tabulate
 
 error1, error2 = [], []
-for Ds in [[2, 8, 8], [2, 8, 8, 8], [2, 16, 16, 8, 8]]:
+for Ds in [[2, 8, 8]]:
     print(Ds)
-    model = networks.create_fns(1, 1, Ds, 0, log_sigma_x=np.zeros(Ds[-1]))
+    model = networks.create_fns(1, 1, Ds, 0, var_x=np.ones(Ds[-1]))
     
     x = np.random.randn(Ds[0])/10
     output, A, b, inequalities, signs = model['input2all'](x)
@@ -42,7 +42,7 @@ for Ds in [[2, 8, 8], [2, 8, 8, 8], [2, 16, 16, 8, 8]]:
     
     error1.append(np.abs(yy - yy2).mean())
     error2.append(((yy - yy2)**2).mean())
-
+    print(error1, error2)
 
 print(np.array(error1).reshape((3, 6)))
 print(np.array(error2).reshape((3, 6)))
