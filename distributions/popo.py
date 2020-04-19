@@ -33,12 +33,12 @@ def formatit(X0, X1, Y0, Y1):
     plt.yticks(w, [str(t) for t in w])
 
 
-for ss in [0.0003, 0.2, 0.5]:
+for ss in [0.5, 0.2, 0.5]:
     np.random.seed(int(sys.argv[-1]) + 10)
     sigma_x = np.eye(Ds[-1]) * ss
     for i in range(5):
         fig = plt.figure(figsize=(5,5))
-        model =  networks.create_fns(BS, R, Ds, 0, logvar_x = np.log(ss))
+        model =  networks.create_fns(BS, R, Ds, 0, var_x = ss**2)
     
         output, A, b, inequalities, signs = model['input2all'](np.random.randn(Ds[0]))
     
@@ -49,7 +49,7 @@ for ss in [0.0003, 0.2, 0.5]:
         
         predictions = np.array([model['input2all'](np.random.randn(Ds[0]))[0] for z in range(200)])
     
-        noise = np.random.randn(*predictions.shape)*np.sqrt(ss)
+        noise = np.random.randn(*predictions.shape) * ss
         plt.scatter(predictions[:,0] + noise[:, 0],
                     predictions[:, 1] + noise[:, 1], color='blue',
                     label=r'$g(\mathbf{z})+\epsilon$', alpha=0.5,
@@ -78,9 +78,9 @@ for ss in [0.0003, 0.2, 0.5]:
         xxx = np.hstack([xxx[0].flatten()[:, None], xxx[1].flatten()[:, None]])
         
         p = list()
-        sigma_x = np.eye(2) * model['varx']()
+        cov_x = np.eye(2) * model['varx']()
         for xx in tqdm(xxx):
-            p.append(utils.marginal_moments(xx, regions, sigma_x, np.eye(1))[0])
+            p.append(utils.marginal_moments(xx, regions, cov_x, np.eye(1))[0])
         p = np.array(p).reshape((N, N))
     
         fig = plt.figure()

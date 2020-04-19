@@ -31,17 +31,19 @@ def plt_state():
 
 np.random.seed(int(sys.argv[-1]) + 10)
 
-Ds = [1, 16, 64]
+Ds = [1, 20, 64]
 R, BS = 110, 150
 model = networks.create_fns(BS, R, Ds, 0, var_x = np.ones(Ds[-1]), lr=0.001)
 
 DATA = datasets.load_digits(n_class=1).images
-DATA = DATA[:BS].reshape((BS, -1)) + np.random.randn(BS, Ds[-1]) * 0.1
-DATA /= DATA.max()
-print(DATA)
+DATA = DATA[:BS].reshape((BS, -1))
+DATA /= (0.1 + DATA.max(1, keepdims=True))
+DATA -= DATA.mean(1, keepdims=True)
+DATA += np.random.randn(BS, Ds[-1]) * 0.3
+
 L = []
 for iter in tqdm(range(16)):
-    L.append(networks.EM(model, DATA, 400))
+    L.append(networks.EM(model, DATA, 100))
     plt_state()
     plt.savefig('samples_{}.png'.format(iter))
     plt.close()

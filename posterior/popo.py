@@ -25,18 +25,19 @@ R, BS = 40, 50
 
 
 if Ds[0] == 1:
-    xx = np.linspace(-3, 3, 500)
+    xx = np.linspace(-3, 3, 500).reshape((-1, 1))
 else:
     xx = np.meshgrid(np.linspace(-3, 3, 100), np.linspace(-3, 3, 100))
     xx = np.vstack([xx[0].flatten(), xx[1].flatten()]).T
 
 
 
-for ss in [0.01, 0.2, 0.5]:
+for ss in [0.1, 0.2, 0.5]:
     np.random.seed(int(sys.argv[-1]) + 10)
     for i in range(5):
+
         fig = plt.figure(figsize=(5,5))
-        model = networks.create_fns(BS, R, Ds, 0, logvar_x=np.log(ss))
+        model = networks.create_fns(BS, R, Ds, 0, var_x=ss**2)
 
         z = np.random.randn(Ds[0])
         output, A, b, inequalities, signs = model['input2all'](z)
@@ -49,13 +50,13 @@ for ss in [0.01, 0.2, 0.5]:
         Bs = np.array([regions[s]['Ab'][1] for s in regions])
         
         predictions = model['sample'](200)
-        noise = np.random.randn(*predictions.shape)*np.sqrt(ss)
+        noise = np.random.randn(*predictions.shape) * ss
 
         vx = np.eye(2) * model['varx']()
-        p1 = utils.posterior(xx, regions, output, As, Bs, np.eye(1), vx)
-        p2 = utils.posterior(xx, regions, outpute, As, Bs, np.eye(1), vx)
+        p1 = utils.posterior(xx, regions, output, As, Bs, np.eye(1), vx, model['input2signs'])
+        p2 = utils.posterior(xx, regions, outpute, As, Bs, np.eye(1), vx, model['input2signs'])
         print(p1, p2)
-        print((p1*8/500).sum(), (p2 * 8 / 500).sum())
+        print((p1 * 6 / 500).sum(), (p2 * 6 / 500).sum())
 
         if Ds[0] == 1:
             plt.plot(xx, p1, label=r'$p(\mathbf{z}|g(\mathbf{z}_0))$')

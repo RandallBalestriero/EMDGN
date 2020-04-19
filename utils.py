@@ -117,19 +117,27 @@ def lse(x):
     return np.log(np.sum(np.exp(x - x_max))) + x_max
 
 
-def find_region(x, regions, f):
-    x_signs = np.array([f(a) for a in x])
-    return np.equal(x_signs[:, None, :], np.array(list(regions.keys()))).prod(2).argmax(1)
+def find_region(z, regions, input2sign):
+    x_signs = np.array([input2sign(zz.reshape((-1,))) for zz in z])
+    signs = np.array(list(regions.keys()))
+    return np.equal(x_signs[:, None, :], signs).all(2).argmax(1)
 
 
-def in_region(x, ineq):
-    if ineq is None:
-        return np.ones(x.shape[0]).astype('bool')
-    if x.ndim > 1:
-        x = np.hstack([np.ones((x.shape[0], 1)), x])
+def in_region(z, ineq):
+    """
+    z is shape (N, S) or (S)
+    ineq is shape (K, S+1)
+    """
+    
+    if z.ndim > 1:
+        if ineq is None:
+            return np.ones(z.shape[0], dtype='bool')
+        zp = np.hstack([np.ones((z.shape[0], 1)), z])
+        return (np.einsum('ks,ns->nk', ineq, zp) >= 0).all(axis=1)
     else:
-        x = np.vstack([np.ones(x.shape[0]), x]).T
-    return (x.dot(ineq.T) >= 0).prod(1).astype('bool')
+        if ineq is None:
+            return True
+        return (ineq.dot(np.hstack([np.ones(1), z])) >= 0).all()
 
 
 
@@ -471,17 +479,19 @@ def log_kappa(x, sigma_x, sigma_z, A, b):
 
 
 ##################################
-def posterior(z, regions, x, As, Bs, sigma_z, sigma_x):
-    mus, sigmas = mu_sigma(x, As, Bs, sigma_z, sigma_x)
-    kappas = np.exp(log_kappa(x, sigma_x, sigma_z, As, Bs))
-    phis = phis_all([regions[r]['ineq'] for r in regions], mus, sigmas)
+def posterior(z, regions, x, As, Bs, cov_z, cov_x, input2signs):
+    mu, cov = mu_sigma(x, As, Bs, cov_z, cov_x)
+    kappas = np.exp(log_kappa(x, cov_x, cov_z, As, Bs))
+    phis0 = phis_all([regions[r]['ineq'] for r in regions], mu, cov)[0]
+ 
+    indices = find_region(z, regions, input2signs)
 
-    output = np.zeros(len(z))
-    for k, r in enumerate(regions):
-        w = in_region(z, regions[r]['ineq'])
-        output[w] = kappas[k] * multivariate_normal.pdf(z[w], mean=mus[k],
-                                                      cov=sigmas[k])
-    output /= (kappas * phis[0]).sum()
+    output = np.zeros(len(indices))
+    for k in np.unique(indices):
+        w = indices == k
+        output[w] = multivariate_normal.pdf(z[w], mean=mu[k], cov=cov[k])
+
+    output *= kappas[indices] / (kappas * phis0).sum()
     return output
 
 

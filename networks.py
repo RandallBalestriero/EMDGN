@@ -9,8 +9,8 @@ import utils
 
 def init_weights(Ds, seed):
     np.random.seed(seed)
-    Ws = [sj.initializers.he((j, i)) for j, i in zip(Ds[1:], Ds[:-1])]
-    bs = [sj.initializers.he((j,)) for j in Ds[1:]]
+    Ws = [sj.initializers.he((j, i)) * 2 for j, i in zip(Ds[1:], Ds[:-1])]
+    bs = [sj.initializers.he((j,)) * 2 for j in Ds[1:]]
     return Ws, bs
 
 
@@ -99,6 +99,7 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
     Ws = [T.Variable(w) for w in Ws]
     bs = [T.Variable(b) for b in bs]
     var_x = T.Variable(var_x)
+    var_z = T.Variable(T.ones(Ds[0]))
 
     # create the placeholders
     Ws_ph = [T.Placeholder(w.shape, w.dtype) for w in Ws]
@@ -154,23 +155,26 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
     inequalities_code = T.hstack([T.concatenate(B_q[1:-1])[:, None],
                                   T.vstack(A_q[1:-1])]) * in_signs[:, None]
 
-    Am1 = T.einsum('qds,nqs->nqd', batch_A_q, m1)
+    Am1 = T.einsum('qds,nqs->nd', batch_A_q, m1)
+    ABm1 = T.einsum('qds,qd,nqs->nd', batch_A_q, batch_B_q, m1)
     Bm0 = T.einsum('qd,nq->nd', batch_B_q, m0)
-    inner = 2 * ((Am1 * batch_B_q / var_x).sum(1) - x * (Am1.sum(1) + Bm0))
+    inner = 2 * (ABm1 - x * (Am1 + Bm0))
 
     AAm2 = T.einsum('qds,qdu,nqup->nsp', batch_A_q, batch_A_q, m2)
     B2m0 = T.einsum('nq,qd->nd', m0, batch_B_q ** 2)
     squares = x ** 2 + B2m0 + T.diagonal(AAm2, axis1=1, axis2=2)
 
-    pz = T.trace(m2.sum(1), axis1=1, axis2=2)
+    pz = T.diagonal(m2, axis1=2, axis2=3).sum(1)
 
-    cst = (Ds[0] + Ds[-1]) * T.log(2 * np.pi) + T.log(var_x).sum()
+    cst = (Ds[0] + Ds[-1]) * T.log(2 * np.pi) + T.log(var_x).sum() + T.log(var_z).sum()
 
-    loss = 0.5 * (cst + T.sum((inner + squares) / var_x, 1) + pz)
+    loss = 0.5 * (cst + T.sum((inner + squares) / var_x, 1)\
+                      + T.sum(pz / var_z, 1))
     mean_loss = loss.mean()
-    adam = sj.optimizers.NesterovMomentum(mean_loss, Ws + bs, lr, 0.9)
-    update_var = (inner + squares).mean(0)
-    updates = {**adam.updates, var_x: update_var}
+    adam = sj.optimizers.NesterovMomentum(mean_loss, Ws + bs, lr, 0.5)
+    update_varx =  (inner + squares).mean() * T.ones(Ds[-1])
+    update_varz =  pz.mean() * T.ones(Ds[0])
+    updates = {**adam.updates}#, var_x: update_varx, var_z: update_varz}
     output = {'train':sj.function(batch_in_signs, x, m0, m1, m2,
                                   outputs=mean_loss, updates=updates),
               'signs2Ab': sj.function(in_signs, outputs=[A_q[-1], B_q[-1]]),
@@ -184,6 +188,7 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
                                     updates=dict(zip(Ws + bs + [var_x],
                                              Ws_ph + bs_ph + [var_x_ph]))),
               'varx': sj.function(outputs=var_x),
+              'varz': sj.function(outputs=var_z),
               'input2signs': sj.function(input, outputs=signs),
               'S' : Ds[0], 'D':  Ds[-1], 'R': R, 'model': 'EM'}
     def sample(n):
@@ -212,14 +217,15 @@ def EM(model, DATA, n_iter):
     print('regions', len(regions))
 
     varx = np.eye(D) * model['varx']()
-    print('varx', np.diag(varx).min(), np.diag(varx).max(), np.diag(varx))
+    varz = np.eye(S) * model['varz']()
+    print('varx', np.diag(varx))
+    print('varz', np.diag(varz))
     m0 = np.zeros((DATA.shape[0], len(regions)))
     m1 = np.zeros((DATA.shape[0], len(regions), S))
     m2 = np.zeros((DATA.shape[0], len(regions), S, S))
 
     for i, x in enumerate(DATA):
-        m0[i], m1[i], m2[i] = utils.marginal_moments(x, regions, varx,
-                                                     np.eye(S))[1:]
+        m0[i], m1[i], m2[i] = utils.marginal_moments(x, regions, varx, varz)[1:]
 
     P = R - len(regions)
     assert P >= 0
