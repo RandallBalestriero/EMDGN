@@ -118,11 +118,7 @@ def lse(x):
 
 
 def find_region(x, regions, f):
-    x_signs = []
-    for x_ in x:
-        x_signs.append(f(x_)[-1])
-    x_signs = np.array(x_signs)
-
+    x_signs = np.array([f(a) for a in x])
     return np.equal(x_signs[:, None, :], np.array(list(regions.keys()))).prod(2).argmax(1)
 
 

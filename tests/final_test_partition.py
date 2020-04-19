@@ -3,73 +3,13 @@ sys.path.insert(0, "../SymJAX")
 import numpy as np
 import symjax as sj
 import symjax.tensor as T
-import cdd
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')
 import utils
+import networks
 from tqdm import tqdm
-from scipy.spatial import ConvexHull
-from multiprocessing import Pool
 
-def create_fns(input, in_signs, Ds):
-
-    cumulative_units = np.concatenate([[0], np.cumsum(Ds[:-1])])
-    
-    Ws = [sj.initializers.he((j, i)) for j, i in zip(Ds[1:], Ds[:-1])]
-    bs = [sj.initializers.he((j,)) for j in Ds[1:]]
-
-    A_w = [T.eye(Ds[0])]
-    B_w = [T.zeros(Ds[0])]
-    
-    A_q = [T.eye(Ds[0])]
-    B_q = [T.zeros(Ds[0])]
-    
-    maps = [input]
-    signs = []
-    masks = [T.ones(Ds[0])]
-    in_masks = T.where(T.concatenate([T.ones(Ds[0]), in_signs]) > 0, 1.,
-                                     0.1)
-
-    for w, b in zip(Ws[:-1], bs[:-1]):
-        
-        pre_activation = T.matmul(w, maps[-1]) + b
-        signs.append(T.sign(pre_activation))
-        masks.append(T.where(pre_activation > 0, 1., 0.1))
-
-        maps.append(pre_activation * masks[-1])
-
-    maps.append(T.matmul(Ws[-1], maps[-1]) + bs[-1])
-
-    # compute per region A and B
-    for start, end, w, b, m in zip(cumulative_units[:-1],
-                                   cumulative_units[1:], Ws, bs, masks):
-
-        A_w.append(T.matmul(w * m, A_w[-1]))
-        B_w.append(T.matmul(w * m, B_w[-1]) + b)
-
-        A_q.append(T.matmul(w * in_masks[start:end], A_q[-1]))
-        B_q.append(T.matmul(w * in_masks[start:end], B_q[-1]) + b)
-
-    signs = T.concatenate(signs)
-    ineq_b = T.concatenate(B_w[1:-1])
-    ineq_A = T.vstack(A_w[1:-1])
-
-    inequalities = T.hstack([ineq_b[:, None], ineq_A])
-    inequalities = inequalities * signs[:, None] / T.linalg.norm(ineq_A, 2,
-                                                         1, keepdims=True)
-
-    inequalities_code = T.hstack([T.concatenate(B_q[1:-1])[:, None],
-                                  T.vstack(A_q[1:-1])])
-    inequalities_code = inequalities_code * in_signs[:, None]
-
-    f = sj.function(input, outputs=[maps[-1], A_w[-1], B_w[-1],
-                                    inequalities, signs])
-    g = sj.function(in_signs, outputs=[A_q[-1], B_q[-1]])
-    all_g = sj.function(in_signs, outputs=inequalities_code)
-    h = sj.function(input, outputs=maps[-1])
-
-    return f, g, h, all_g
 
 
 for Ds in [[2, 4, 1], [2, 8, 1], [2, 3, 3, 2, 1]]:

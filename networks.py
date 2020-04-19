@@ -80,7 +80,7 @@ def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002):
 
 
 
-def create_fns(batch_size, R, Ds, seed, log_sigma_x, leakiness=0.1, lr=0.0002):
+def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
 
     input = T.Placeholder((Ds[0],), 'float32')
     in_signs = T.Placeholder((np.sum(Ds[1:-1]),), 'bool')
@@ -98,13 +98,12 @@ def create_fns(batch_size, R, Ds, seed, log_sigma_x, leakiness=0.1, lr=0.0002):
     # create the variables
     Ws = [T.Variable(w) for w in Ws]
     bs = [T.Variable(b) for b in bs]
-    log_sigma_x = T.Variable(log_sigma_x)
-    var_x = T.exp(2 * log_sigma_x)
+    var_x = T.Variable(var_x)
 
     # create the placeholders
     Ws_ph = [T.Placeholder(w.shape, w.dtype) for w in Ws]
     bs_ph = [T.Placeholder(b.shape, b.dtype) for b in bs]
-    log_sigma_x_ph = T.Placeholder((Ds[-1],), 'float32')
+    var_x_ph = T.Placeholder(var_x.shape, var_x.dtype)
 
     A_w = [T.eye(Ds[0])]
     B_w = [T.zeros(Ds[0])]
@@ -118,11 +117,9 @@ def create_fns(batch_size, R, Ds, seed, log_sigma_x, leakiness=0.1, lr=0.0002):
     maps = [input]
     signs = []
     masks = [T.ones(Ds[0])]
-
     in_masks = relu_mask(T.concatenate([T.ones(Ds[0]), in_signs]), leakiness)
     batch_in_masks = relu_mask(T.concatenate([T.ones((R, Ds[0])),
                                               batch_in_signs], 1), leakiness)
-
     for w, b in zip(Ws[:-1], bs[:-1]):
         
         pre_activation = T.matmul(w, maps[-1]) + b
@@ -146,7 +143,6 @@ def create_fns(batch_size, R, Ds, seed, log_sigma_x, leakiness=0.1, lr=0.0002):
                                   batch_A_q[-1]))
         batch_B_q.append((w * batch_in_masks[:, None, start:end]\
                             * batch_B_q[-1][:, None, :]).sum(2) + b)
-
     batch_B_q = batch_B_q[-1]
     batch_A_q = batch_A_q[-1]
 
@@ -160,45 +156,40 @@ def create_fns(batch_size, R, Ds, seed, log_sigma_x, leakiness=0.1, lr=0.0002):
 
     Am1 = T.einsum('qds,nqs->nqd', batch_A_q, m1)
     Bm0 = T.einsum('qd,nq->nd', batch_B_q, m0)
-    inner = - 2 * (x * (Am1.sum(1) + Bm0) / var_x).sum(1)\
-            + 2 * (Am1 * batch_B_q / var_x).sum((1, 2))
+    inner = 2 * ((Am1 * batch_B_q / var_x).sum(1) - x * (Am1.sum(1) + Bm0))
 
-    AAm2 = T.einsum('qds,qdu,nqup->nsp', batch_A_q / var_x[:, None] , batch_A_q, m2)
-    B2m0 = T.einsum('nq,qd->n', m0, batch_B_q ** 2 / var_x)
-    squares = (x ** 2 / var_x).sum(1) + B2m0 + T.trace(AAm2, axis1=1, axis2=2)
+    AAm2 = T.einsum('qds,qdu,nqup->nsp', batch_A_q, batch_A_q, m2)
+    B2m0 = T.einsum('nq,qd->nd', m0, batch_B_q ** 2)
+    squares = x ** 2 + B2m0 + T.diagonal(AAm2, axis1=1, axis2=2)
 
     pz = T.trace(m2.sum(1), axis1=1, axis2=2)
 
-    cst = 0.5 * (Ds[0] + Ds[-1]) * T.log(2 * np.pi) + log_sigma_x.sum()
+    cst = (Ds[0] + Ds[-1]) * T.log(2 * np.pi) + T.log(var_x).sum()
 
-    loss = cst + 0.5 * (inner + squares + pz)
-
+    loss = 0.5 * (cst + T.sum((inner + squares) / var_x, 1) + pz)
     mean_loss = loss.mean()
-    adam = sj.optimizers.NesterovMomentum(mean_loss, Ws + bs + [log_sigma_x], lr, 0.9)
-
-    train = sj.function(batch_in_signs, x, m0, m1, m2, outputs=mean_loss, updates=adam.updates)
-    get_nll = sj.function(batch_in_signs, x, m0, m1, m2, outputs=mean_loss)
-    in2all = sj.function(input, outputs=[maps[-1], A_w[-1], B_w[-1],
-                                    inequalities, signs])
-    signs2Ab = sj.function(in_signs, outputs=[A_q[-1], B_q[-1]])
-    signs2q = sj.function(in_signs, outputs=inequalities_code)
-    g = sj.function(input, outputs=maps[-1])
-    varx = sj.function(outputs=var_x)
-    assign = sj.function(*Ws_ph, *bs_ph, log_sigma_x_ph,
-                         updates=dict(zip(Ws + bs + [log_sigma_x],
-                                          Ws_ph + bs_ph + [log_sigma_x_ph])))
-
-    output = {'train':train, 'signs2Ab':signs2Ab, 'signs2q':signs2q, 'g':g,
-            'input2all':in2all, 'get_nll':get_nll, 'assign':assign, 'varx':varx}
-    output['S'] = Ds[0]
-    output['D'] = Ds[-1]
-    output['R'] = R
-    output['model'] = 'EM'
-
+    adam = sj.optimizers.NesterovMomentum(mean_loss, Ws + bs, lr, 0.9)
+    update_var = (inner + squares).mean(0)
+    updates = {**adam.updates, var_x: update_var}
+    output = {'train':sj.function(batch_in_signs, x, m0, m1, m2,
+                                  outputs=mean_loss, updates=updates),
+              'signs2Ab': sj.function(in_signs, outputs=[A_q[-1], B_q[-1]]),
+              'signs2q': sj.function(in_signs, outputs=inequalities_code),
+              'g': sj.function(input, outputs=maps[-1]),
+              'input2all': sj.function(input, outputs=[maps[-1], A_w[-1],
+                                       B_w[-1], inequalities, signs]),
+              'get_nll': sj.function(batch_in_signs, x, m0, m1, m2,
+                                     outputs=mean_loss),
+              'assign': sj.function(*Ws_ph, *bs_ph, var_x_ph,
+                                    updates=dict(zip(Ws + bs + [var_x],
+                                             Ws_ph + bs_ph + [var_x_ph]))),
+              'varx': sj.function(outputs=var_x),
+              'input2signs': sj.function(input, outputs=signs),
+              'S' : Ds[0], 'D':  Ds[-1], 'R': R, 'model': 'EM'}
     def sample(n):
         samples = []
         for i in range(n):
-            samples.append(g(np.random.randn(Ds[0])))
+            samples.append(output['g'](np.random.randn(Ds[0])))
         return np.array(samples)
     output['sample'] = sample
 
@@ -221,7 +212,7 @@ def EM(model, DATA, n_iter):
     print('regions', len(regions))
 
     varx = np.eye(D) * model['varx']()
-    print('varx', varx)
+    print('varx', np.diag(varx).min(), np.diag(varx).max(), np.diag(varx))
     m0 = np.zeros((DATA.shape[0], len(regions)))
     m1 = np.zeros((DATA.shape[0], len(regions), S))
     m2 = np.zeros((DATA.shape[0], len(regions), S, S))
