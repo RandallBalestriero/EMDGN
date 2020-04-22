@@ -172,21 +172,21 @@ def flip(A, i):
 
 
 
-def find_neighbours(signs2q, signs):
+def find_neighbours(signs2ineq, signs):
 
-    ineq = signs2q(np.array(signs))
+    ineq = signs2ineq(np.array(signs))
 
-    M = cdd.Matrix(np.hstack([ineq[:, [0]], ineq[:, 1:]]))
+    M = cdd.Matrix(ineq)
     M.rep_type = cdd.RepType.INEQUALITY
     redundant = set(M.canonicalize()[1])
     I = list(set(range(len(signs))) - redundant)
     F = np.ones((len(I), len(signs)))
-    F[np.arange(len(I)), I] = -1
+    F[np.arange(len(I)), I] = - 1
     return F * signs, np.array(M)
 
 
 
-def search_region(signs2q, signs2Ab, signs, max_depth=9999999999999):
+def search_region(signs2ineq, signs2Ab, signs, max_depth=9999999999999):
     S = dict()
     parents=[signs]
     for d in range(max_depth+1):
@@ -194,7 +194,7 @@ def search_region(signs2q, signs2Ab, signs, max_depth=9999999999999):
             return S
         children = []
         for s in parents:
-            neighbours, M = find_neighbours(signs2q, s)
+            neighbours, M = find_neighbours(signs2ineq, s)
             A_w, b_w = signs2Ab(s)
             S[tuple(s)] = {'ineq': M, 'Ab': (A_w, b_w)}
             for n in neighbours:
@@ -341,6 +341,8 @@ def cones_to_rectangle(ineqs, mu, cov):
         lower = np.array([-np.inf] * len(cov))
         return lower, cov, np.eye(len(lower))
 
+    l2 = np.linalg.norm(ineqs[:, 1:], 2, 1)
+    ineqs = ineqs[l2 > 0]
     ineqs /= np.linalg.norm(ineqs[:, 1:], 2, 1, keepdims=True)
 
     A, b = ineqs[:, 1:], -ineqs[:, 0]
@@ -348,7 +350,8 @@ def cones_to_rectangle(ineqs, mu, cov):
     if D == 0:
         R = A
     else:
-        R = np.vstack([A, create_H(A).dot(np.linalg.inv(cov))])
+        R = np.vstack([A, create_H(A)])
+        #R = np.vstack([A, create_H(A).dot(np.linalg.inv(cov))])
     b = np.concatenate([b, np.array([-np.inf] * D)])
     if mu.ndim == 1:
         l_c = b - R.dot(mu)
@@ -430,8 +433,11 @@ def phis_w(ineqs, mu_w, sigma_w):
     Phi_w = 0.
     Phi1_w = 0.
     Phi2_w = 0.
-
-    v = np.array(get_vertices(ineqs))[:, 1:]
+    if ineqs.shape[1] == 2:
+        knots = - ineqs[:, 0] / ineqs[:, 1]
+        v = np.sort(knots).reshape((-1, 1))
+    else:
+        v = np.array(get_vertices(ineqs))[:, 1:]
     for simplex in get_simplices(v):
         for ineqs_c, s in zip(*simplex_to_cones(v[simplex])):
         

@@ -87,9 +87,10 @@ else:
 DATA = np.random.randn(BS, Ds[-1])
 DATA /= np.linalg.norm(DATA, 2, 1, keepdims=True)
 
-#DATA = np.linspace(-3, 3, BS)
-#DATA = np.vstack([DATA, np.cos(DATA*2)]).T
+DATA = np.linspace(-3, 3, BS)
+DATA = np.vstack([DATA, np.cos(DATA*2)]).T
 DATA += np.random.randn(BS, Ds[-1]) * 0.1
+DATA /= 10
 
 plt_state()
 plt.savefig('baseline.png')
