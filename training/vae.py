@@ -16,14 +16,14 @@ from matrc import *
 
 np.random.seed(int(sys.argv[-2]) + 10)
 
-Ds = [1, 5, 5, 2]
+Ds = [1, 22, 2]
 R, BS = 100, 250
 
 if sys.argv[-1] == 'VAE':
     model = networks.create_vae(BS, Ds, 1, lr=0.005, leakiness=0.1)
 else:
     model = networks.create_fns(BS, R, Ds, 1, var_x = np.ones(Ds[-1]),
-                                lr=0.001, leakiness=0.01)
+                                lr=0.001, leakiness=0.1)
 
 X = model['sample'](BS)
 noise = np.random.randn(*X.shape) * np.sqrt(model['varx']())
@@ -45,13 +45,14 @@ DATA += np.random.randn(BS, Ds[-1]) * np.sqrt(0.01)
 
 DATA -= DATA.mean(0)
 DATA /= DATA.max(0)
-DATA += 1
+DATA *= 5
 
 L = []
 for iter in tqdm(range(150)):
     L.append(networks.EM(model, DATA, 100))
+
     print(L[-1])
-    print(L[-1][0], L[-1][-1])
+#    print(L[-1][0], L[-1][-1])
 
     X = model['sample'](BS)
     noise = np.random.randn(*X.shape) * np.sqrt(model['varx']())

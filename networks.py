@@ -7,11 +7,12 @@ import symjax.tensor as T
 import utils
 
 
-cov_b = 10
+cov_b = 20
+cov_W = 20
 
 def init_weights(Ds, seed):
     np.random.seed(seed)
-    Ws = [sj.initializers.glorot((j, i)) for j, i in zip(Ds[1:], Ds[:-1])]
+    Ws = [sj.initializers.normal((j, i)) for j, i in zip(Ds[1:], Ds[:-1])]
     bs = [sj.initializers.normal((j,)) for j in Ds[1:]]
     return Ws, bs
 
@@ -149,7 +150,7 @@ def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002):
 
 
 
-def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
+def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z = None):
 
     x = T.Placeholder((Ds[0],), 'float32')
     X = T.Placeholder((batch_size, Ds[-1]), 'float32')
@@ -168,7 +169,7 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
     vs = [T.Variable(v, name='v' + str(l)) for l, v in enumerate(vs)]
 
     var_x = T.Variable(var_x)
-    var_z = T.Variable(T.ones(Ds[0]))
+    var_z = T.Variable(T.ones(Ds[0])) if var_z is None else var_z
 
     # create the placeholders
     Ws_ph = [T.Placeholder(w.shape, w.dtype) for w in Ws]
@@ -218,7 +219,8 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
                         axis1=1, axis2=2)
     B2m0 = T.einsum('Nn,nd->Nd', m0, bQs[-1] ** 2)
     
-    prior = sum([(v**2).sum() for v in vs], 0.) / cov_b
+    prior = sum([(v**2).sum() for v in vs], 0.) / cov_b\
+            + sum([(w**2).sum() for w in Ws], 0.) / cov_W
 
     loss = - 0.5 * ((Ds[0] + Ds[-1]) * T.log(2 * np.pi) + T.log(var_x).sum()\
                                                  + T.log(var_z).sum())\
@@ -228,8 +230,10 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
     adam = sj.optimizers.NesterovMomentum(mean_loss, Ws, lr, 0.1)
 
     # update of var_x
-    update_varx = (X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1).mean(0)
- 
+    update_varx = (X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1).mean()\
+                    * T.ones(Ds[-1])
+    update_varx = var_x
+    ppvar_x = update_varx / update_varx.min()
     # update for biases
     FQ = get_forward(Ws, relu_mask(Qs, leakiness))
     update_vs = []
@@ -239,8 +243,8 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
         to_take = update_vs[:i] + [T.zeros_like(vs[i])] + vs[i + 1:]
         
         # now we forward each bias to the x-space
-        separated_bs = T.stack([T.einsum('nds,s->nd', FQ[i], to_take[i])
-                                                    for i in range(len(FQ))])
+        separated_bs = T.stack([T.einsum('nds,s->nd', FQ[u], to_take[u])
+                                                    for u in range(len(FQ))])
         # sum the biases and apply the m0 scaling
         b_contrib = T.einsum('Lnd,Nn->nNd', separated_bs, m0)
 
@@ -256,45 +260,51 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002):
 
         update_vs.append(T.matmul(T.linalg.inv(whiten), Error))
  
-#    # update for slopes
-#    FQ = get_forward(Ws, relu_mask(Qs, leakiness))
-#    update_Ws = []
-#    # since it does not change we ue thie following 
-#    pm0 = T.where(m0 > 1e-9, m0, 1)
-#    valid = T.where(m0 > 1e-9, 1., 0.)
-#    for i in range(len(Ds) - 1):
-#        
-#        # find which one to take
-#        to_take_v = [T.zeros_like(s[i])] * i + update_vs[i:]
-#
-#        # now we forward each bias to the x-space
-#        separated_bs = T.stack([T.einsum('nds,s->nd', FQ[i], to_take_v[i])
-#                                                    for i in range(len(FQ))])
-#        # sum the biases and apply the m0 scaling
-#        rhs = T.einsum('nds,Nns->Nnd', AQs[i], m1) + bQs[i] * m0[:, :, None]
-#        residual = (X[:, None, :] - separated_bs.sum(0)) / var_x
-#        lhs = T.einsum('nd,nds->ns', relu_mask(Qs[i], leakiness), AQs[i])
-#
-#        # get the linear contribution
-#        A_contrib = T.einsum('nds,Nns->nNd', AQs[-1], m1)
-#
-#        # compute the residual and apply sigma
-#        error = (X - A_contrib - b_contrib) / update_varx
-#
-#        # compute the whitening (U) matrix
-#        U = T.einsum('ndc,d,nds,Nn->ncs', FQ[i], 1/update_varx, FQ[i], 1/pm0) + T.eye(Ds[i + 1])
-#        U_inv = T.linalg.inv(U)
-#
-#        # compute the whitening (V) matrix
-#        U = T.einsum('ndc,d,nds,Nn->ncs', FQ[i], 1/update_varx, FQ[i], 1/pm0) + T.eye(Ds[i + 1])
-#        U_inv = T.linalg.inv(U)
-#
-#        update_ws.append(T.einsum('Nn,ncs,nds,nNd->Nc', valid, whiten_inv, FQ[i], error).mean(0))
-#
-#
+    # update for slopes
+    update_Ws = []
+    for i in range(len(Ws)):
+        
+        U = T.einsum('nds,d,ndc->nsc', FQ[i], 1/ppvar_x, FQ[i])
+
+        if i == 0:
+            V = m2.mean(0)
+        else:
+            nAQs, nbQs = get_Abs(update_Ws[:i] + Ws[i:], update_vs, relu_mask(Qs, leakiness))
+            V1 = T.einsum('nd,nq,Nn->Nndq', nbQs[i-1], nbQs[i-1], m0)
+            V2 = T.einsum('nds,nqc,Nnsc->Nndq', nAQs[i-1], nAQs[i-1], m2)
+            V3 = T.einsum('nds,nq,Nns->Nndq', nAQs[i-1], nbQs[i-1], m1)
+            V4 = V3.transpose((0, 1, 3, 2))
+            mask = relu_mask(Qs[i-1], leakiness)
+            V = T.einsum('nd,Nndq,nq->ndq', mask, V1 + V2 + V3 + V4, mask) / batch_size
+
+        whiten = T.stack([T.kron(U[n], V[n].transpose())
+                          for n in range(V.shape[0])])
+        print(U, V, whiten)
+        whiten_inv = T.linalg.inv(whiten.sum(0) + update_varx.min()*T.eye(Ds[i] * Ds[i + 1]) / cov_W)
+
+        # now we forward each bias to the x-space
+        separated_bs = T.stack([T.einsum('nds,s->nd', FQ[u], update_vs[u])
+                                            for u in range(i, len(FQ))])
+
+        # sum the biases and apply the m0 scaling
+        residual = (X[:, None, :] - separated_bs.sum(0)) / ppvar_x
+
+        if i == 0:
+            rhs = m1
+        else:
+            rhs1 = T.einsum('nds,Nns->Nnd', nAQs[i-1], m1)
+            rhs2 = T.einsum('nd,Nn->Nnd', nbQs[i-1], m0)
+            rhs = T.einsum('nd,Nnd->Nnd', mask, rhs1 + rhs2)
+
+        vector = T.einsum('ndc,Nnd,Nns->cs', FQ[i], residual, rhs) / batch_size
+
+        W = T.matmul(whiten_inv, vector.flatten()).reshape((Ds[i + 1], Ds[i]))
+
+        update_Ws.append(W)
+
     update_varz =  T.ones(Ds[0])
-    updates = dict([(var_x, update_varx)] + list(zip(vs, update_vs)))
-#    updates = {**adam.updates}#, **updates}#, **updates}#dict(list(zip(vs, update_vs)))
+    updates = dict(list(zip(vs, update_vs)))#dict([(var_x, update_varx)] + list(zip(vs, update_vs)))
+    updates = {**adam.updates, **updates}#dict(list(zip(vs, update_vs)))
     output = {'train':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
                                   updates=updates),
               'signs2Ab': sj.function(q, outputs=[Aqs[-1][0], bqs[-1][0]]),
@@ -353,6 +363,7 @@ def EM(model, DATA, n_iter):
     m0 = np.pad(m0, [[0, 0], [0, P]])
     m1 = np.pad(m1, [[0, 0], [0, P], [0, 0]])
     m2 = np.pad(m2, [[0, 0], [0, P], [0, 0], [0, 0]])
+    print(m0)
     batch_signs = np.pad(np.array(list(regions.keys())), [[0, P], [0, 0]])
     
     m_loss = []

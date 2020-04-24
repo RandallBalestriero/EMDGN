@@ -157,7 +157,7 @@ def create_H(M):
     K, D = M.shape
     A = np.copy(M)
     for i in range(D - K):
-        A, b = np.vstack((A, np.random.rand(D))), np.zeros(K + 1 + i)
+        A, b = np.vstack((A, np.ones((1,D)))), np.zeros(K + 1 + i)
         b[-1] = 1
         vec = lstsq(A, b, rcond=None)[0]
         A[-1] = vec / np.linalg.norm(vec, 2)
@@ -350,8 +350,8 @@ def cones_to_rectangle(ineqs, mu, cov):
     if D == 0:
         R = A
     else:
-        R = np.vstack([A, create_H(A)])
-        #R = np.vstack([A, create_H(A).dot(np.linalg.inv(cov))])
+        #R = np.vstack([A, create_H(A)])
+        R = np.vstack([A, create_H(A).dot(np.linalg.inv(cov))])
     b = np.concatenate([b, np.array([-np.inf] * D)])
     if mu.ndim == 1:
         l_c = b - R.dot(mu)
@@ -395,6 +395,7 @@ def mu_sigma(x, A, b, sigma_z, sigma_x):
         isigma_w = inv_sigma_z + np.einsum('nds,dk,nkz->nsz',A, inv_sigma_x, A)
     else:
         isigma_w = inv_sigma_z + A.T.dot(inv_sigma_x.dot(A))
+
     sigma_w = np.linalg.inv(isigma_w) if isigma_w.ndim > 1 else 1/isigma_w
     
     if A.ndim == 3:
@@ -433,11 +434,11 @@ def phis_w(ineqs, mu_w, sigma_w):
     Phi_w = 0.
     Phi1_w = 0.
     Phi2_w = 0.
-    if ineqs.shape[1] == 2:
-        knots = - ineqs[:, 0] / ineqs[:, 1]
-        v = np.sort(knots).reshape((-1, 1))
-    else:
-        v = np.array(get_vertices(ineqs))[:, 1:]
+#    if ineqs.shape[1] == 2:
+#        knots = - ineqs[:, 0] / ineqs[:, 1]
+#        v = np.sort(knots).reshape((-1, 1))
+#    else:
+    v = np.array(get_vertices(ineqs))[:, 1:]
     for simplex in get_simplices(v):
         for ineqs_c, s in zip(*simplex_to_cones(v[simplex])):
         
