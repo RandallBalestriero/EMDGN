@@ -485,29 +485,21 @@ def posterior(z, regions, x, As, Bs, cov_z, cov_x, input2signs):
 
 
 ############################## ALGO 2
-def marginal_moments(x, regions, sigma_x, sigma_z):
+def marginal_moments(x, regions, cov_x, cov_z):
 
     As = np.array([regions[s]['Ab'][0] for s in regions])
     Bs = np.array([regions[s]['Ab'][1] for s in regions])
 
-    mus, covs = mu_sigma(x, As, Bs, sigma_z, sigma_x) #(R D) (D D)
+    mus, covs = mu_sigma(x, As, Bs, cov_z, cov_x) #(R D) (D D)
 
     log_kappas = log_kappa(x, cov_x, cov_z, As, Bs) #(R)
     
     ineqs = np.array([regions[r]['ineq'] for r in regions])
     
     phis = phis_all(ineqs, mus, covs)
-
-    p0 = np.where(phis[0] > 0, phis[0], 1)
     px = lse(np.nan_to_num(log_kappas + np.log(phis[0])))
-#    print(log_kappas.min(), log_kappas.max(), log_kappas.mean())
     alphas = np.exp(log_kappas)/(np.exp(log_kappas)*phis[0]).sum()
-#    alphas = np.where(px > 1e-2, alphas, 0)
-#    print('logkappa', log_kappas.min(), log_kappas.max())
-#    print('p0', phis[0].min(), phis[0].max())
-#    print('p1', phis[1].min(), phis[1].max())
-    print('alpha', alphas.min(), alphas.max())
-    m0_w = phis[0] * alphas#softmax(np.nan_to_num(log_kappas + np.log(phis[0])))
+    m0_w = phis[0] * alphas
     m1_w = phis[1] * alphas[:, None]
     m2_w = phis[2] * alphas[:, None, None] + np.einsum('nd,nk,n->ndk', mus, mus, m0_w) + np.einsum('nd,nk->ndk', mus, m1_w) + np.einsum('nd,nk->ndk', mus, m1_w).transpose((0, 2, 1))
     m1_w += np.einsum('nd,n->nd', mus, m0_w)

@@ -211,6 +211,9 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
                                                 * signs.transpose()
     q_inequalities = T.hstack([all_bqs.transpose(), all_Aqs[0]]) * q[:, None]
 
+    ############################################################################
+    # loss (E-step NLL)
+    ############################################################################
     Bm0 = T.einsum('nd,Nn->Nd', bQs[-1], m0)
     Am1 = T.einsum('nds,Nns->Nd', AQs[-1], m1)
     xAm1Bm0 = X * (Am1 + Bm0)
@@ -230,12 +233,19 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
     mean_loss = - loss.mean()
     adam = sj.optimizers.NesterovMomentum(mean_loss, Ws, lr, 0.1)
 
+    ############################################################################
     # update of var_x
+    ############################################################################
+
     update_varx = (X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1).mean()\
                     * T.ones(Ds[-1])
     update_varz = M2diag.mean() * T.ones(Ds[0])
 #    ppvar_x = update_varx / update_varx.min()
+
+    ############################################################################
     # update for biases
+    ############################################################################
+
     FQ = get_forward(Ws, relu_mask(Qs, leakiness))
     update_vs = []
     for i in range(len(vs)):
@@ -261,14 +271,17 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
 
         update_vs.append(T.matmul(T.linalg.inv(whiten), Error))
  
+    ############################################################################
     # update for slopes
+    ############################################################################
+
     update_Ws = []
     for i in range(len(Ws)):
         
         U = T.einsum('nds,d,ndc->nsc', FQ[i], 1/var_x, FQ[i])
 
         if i == 0:
-            V = m2.mean(0)
+            V = m2.sum(0)
         else:
             nAQs, nbQs = get_Abs(update_Ws[:i] + Ws[i:], vs, relu_mask(Qs, leakiness))
             V1 = T.einsum('nd,nq,Nn->Nndq', nbQs[i-1], nbQs[i-1], m0)
@@ -280,25 +293,20 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
 
         whiten = T.stack([T.kron(U[n], V[n].transpose())
                           for n in range(V.shape[0])])
-        print(U, V, whiten)
         whiten_inv = T.linalg.inv(whiten.sum(0) + batch_size * T.eye(Ds[i] * Ds[i + 1]) / cov_W)
 
-        # now we forward each bias to the x-space
+        # compute the vector
         separated_bs = T.stack([T.einsum('nds,s->nd', FQ[u], vs[u])
                                             for u in range(i, len(FQ))])
-
-        # sum the biases and apply the m0 scaling
         residual = (X[:, None, :] - separated_bs.sum(0)) / var_x
-
         if i == 0:
             rhs = m1
         else:
-            rhs1 = T.einsum('nds,Nns->Nnd', nAQs[i-1], m1)
-            rhs2 = T.einsum('nd,Nn->Nnd', nbQs[i-1], m0)
-            rhs = T.einsum('nd,Nnd->Nnd', mask, rhs1 + rhs2)
-
+            rhs = (T.einsum('nds,Nns->Nnd', nAQs[i-1], m1) +\
+                    T.einsum('nd,Nn->Nnd', nbQs[i-1], m0))*mask
         vector = T.einsum('ndc,Nnd,Nns->cs', FQ[i], residual, rhs)
 
+        # compute the output
         W = T.matmul(whiten_inv, vector.flatten()).reshape((Ds[i + 1], Ds[i]))
 
         update_Ws.append(W)
@@ -339,7 +347,7 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
     return output
 
 
-def EM(model, DATA, epochs, n_iter):
+def EM(model, DATA, epochs, n_iter, update_var=False):
 
     if model['model'] == 'VAE':
         L = []
@@ -376,12 +384,14 @@ def EM(model, DATA, epochs, n_iter):
             m0[i, :len(regions)], m1[i, :len(regions)], m2[i, :len(regions)] = utils.marginal_moments(x, regions, varx, varz)[1:]
     
         print('after E step', model['loss'](batch_signs, DATA, m0, m1, m2))
-        for i in range(n_iter):
-            m_loss.append(model['train'](batch_signs, DATA, m0, m1, m2))
-            m_loss.append(model['update_vs'](batch_signs, DATA, m0, m1, m2))
-#            m_loss.append(model['update_sigma'](batch_signs, DATA, m0, m1, m2))
-        print('end M step', m_loss[-1])
 
+        for i in range(n_iter):
+#            m_loss.append(model['train'](batch_signs, DATA, m0, m1, m2))
+            m_loss.append(model['update_vs'](batch_signs, DATA, m0, m1, m2))
+            m_loss.append(model['update_Ws'](batch_signs, DATA, m0, m1, m2))
+            if update_var:
+                m_loss.append(model['update_sigma'](batch_signs, DATA, m0, m1, m2))
+        print('end M step', m_loss[-1])
 
 #    m_loss.append(model['update_sigma'](batch_signs, DATA, m0, m1, m2))
     return m_loss
