@@ -3,7 +3,7 @@ from cycler import cycler
 
 
 rc('font',**{'family':'serif','serif':['Computer Modern']})
-rc('text', usetex=True, hinting_factor=8)
+#rc('text', usetex=True, hinting_factor=8)
 rc('xtick', labelsize='xx-large', direction='out')
 rc('ytick', labelsize='xx-large', direction='out')
 rc('figure', figsize=(5, 5))

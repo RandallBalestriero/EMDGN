@@ -16,14 +16,14 @@ from matrc import *
 
 np.random.seed(int(sys.argv[-2]) + 10)
 
-Ds = [1, 22, 2]
+Ds = [1, 4, 2]
 R, BS = 100, 250
 
 if sys.argv[-1] == 'VAE':
     model = networks.create_vae(BS, Ds, 1, lr=0.005, leakiness=0.1)
 else:
-    model = networks.create_fns(BS, R, Ds, 1, var_x = np.ones(Ds[-1]),
-                                lr=0.001, leakiness=0.1)
+    model = networks.create_fns(BS, R, Ds, 1, var_x = np.ones(Ds[-1]) * 0.5,
+                                lr=0.005, leakiness=0.1)
 
 X = model['sample'](BS)
 noise = np.random.randn(*X.shape) * np.sqrt(model['varx']())
@@ -35,25 +35,25 @@ plt.close()
 DATA = np.random.randn(BS, Ds[-1])
 DATA /= np.linalg.norm(DATA, 2, 1, keepdims=True)
 
-DATA = np.linspace(-3, 3, BS)
-DATA = np.vstack([DATA, np.cos(DATA*2)]).T
+#DATA = np.linspace(-3, 3, BS)
+#DATA = np.vstack([DATA, np.cos(DATA*2)]).T
 
 #DATA = np.random.randn(BS) * 3
 #DATA = np.vstack([DATA * np.cos(DATA), DATA * np.sin(DATA)]).T
 
-DATA += np.random.randn(BS, Ds[-1]) * np.sqrt(0.01)
+DATA += np.random.randn(BS, Ds[-1]) * 0.1
 
 DATA -= DATA.mean(0)
 DATA /= DATA.max(0)
-DATA *= 5
+DATA *= 1
 
 L = []
 for iter in tqdm(range(150)):
-    L.append(networks.EM(model, DATA, 100))
+    L.append(networks.EM(model, DATA, 1, 1200))
 
-    print(L[-1])
+#    print(L[-1])
 #    print(L[-1][0], L[-1][-1])
-
+#
     X = model['sample'](BS)
     noise = np.random.randn(*X.shape) * np.sqrt(model['varx']())
     plt.subplot(121)
@@ -64,4 +64,4 @@ for iter in tqdm(range(150)):
     plt.plot(np.concatenate(L))
     plt.savefig('after_{}.png'.format(sys.argv[-1]))
     plt.close()
-    
+   

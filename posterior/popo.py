@@ -23,7 +23,6 @@ in_signs = T.Placeholder((np.sum(Ds[1:-1]),), 'bool')
 
 R, BS = 40, 50
 
-
 if Ds[0] == 1:
     xx = np.linspace(-3, 3, 500).reshape((-1, 1))
 else:
@@ -32,18 +31,18 @@ else:
 
 
 
-for ss in [0.1, 0.2, 0.5]:
+for ss in [1, 0.2, 0.5]:
     np.random.seed(int(sys.argv[-1]) + 10)
     for i in range(5):
 
         fig = plt.figure(figsize=(5,5))
-        model = networks.create_fns(BS, R, Ds, 0, var_x=ss**2)
+        model = networks.create_fns(BS, R, Ds, 0, var_x=np.ones(Ds[-1]) * ss**2)
 
         z = np.random.randn(Ds[0])
         output, A, b, inequalities, signs = model['input2all'](z)
-        outpute = output + np.random.randn(Ds[-1]) * np.sqrt(ss)
+        outpute = output + np.random.randn(Ds[-1]) * ss
     
-        regions = utils.search_region(model['signs2q'], model['signs2Ab'], signs)
+        regions = utils.search_region(model['signs2ineq'], model['signs2Ab'], signs)
         print(len(regions))
     
         As = np.array([regions[s]['Ab'][0] for s in regions])
@@ -53,15 +52,34 @@ for ss in [0.1, 0.2, 0.5]:
         noise = np.random.randn(*predictions.shape) * ss
 
         vx = np.eye(2) * model['varx']()
-        p1 = utils.posterior(xx, regions, output, As, Bs, np.eye(1), vx, model['input2signs'])
-        p2 = utils.posterior(xx, regions, outpute, As, Bs, np.eye(1), vx, model['input2signs'])
-        print(p1, p2)
-        print((p1 * 6 / 500).sum(), (p2 * 6 / 500).sum())
 
+        p1, m10, m11, m12 = utils.posterior(xx, regions, output, As, Bs, np.eye(1), vx, model['input2signs'])
+        p2, m20, m21, m22 = utils.posterior(xx, regions, outpute, As, Bs, np.eye(1), vx, model['input2signs'])
+
+        emp_mu1 = np.average(xx[:,0], weights=p1)
+        emp_mu2 = np.average(xx[:,0], weights=p2)
+        emp_var1 = np.average((xx[:,0])**2, weights=p1)
+        emp_var2 = np.average((xx[:,0])**2, weights=p2)
+
+        print(p1, p2)
+        print(m10.sum(), m20.sum(), np.average(np.ones_like(p1), weights=p1),
+                np.average(np.ones_like(p2), weights=p2))
+        print(m11.sum(), emp_mu1, m21.sum(), emp_mu2)
+
+        print(m12.sum(0), emp_var1, m22.sum(0), emp_var2)
+        adsf
         if Ds[0] == 1:
-            plt.plot(xx, p1, label=r'$p(\mathbf{z}|g(\mathbf{z}_0))$')
+#            plt.plot(xx, p1, label=r'$p(\mathbf{z}|g(\mathbf{z}_0))$')
             plt.plot(xx, p2, label=r'$p(\mathbf{z}|g(\mathbf{z}_0)+\epsilon_0)$')
             plt.axvline(z, color='k', label=r'$\mathbf{z}_0$')
+            plt.axvline(m21.sum(0), color='b', label='mu')
+            plt.axvline(emp_mu2, color='g', linestyle='--')
+            plt.plot([m21.sum(0)-np.sqrt(m22.sum(0)[0,0]),
+                        m21.sum(0)+np.sqrt(m22.sum(0)[0,0])],[1,1])
+            plt.plot([emp_mu2-np.sqrt(emp_var2),
+                        emp_mu2+np.sqrt(emp_var2)],[0.5,0.5])
+
+
         else:
             plt.imshow((np.array(p)).reshape((N, N)), aspect='auto',
                         extent=[-L, L, -L, L], origin='lower')

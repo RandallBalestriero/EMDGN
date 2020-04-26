@@ -98,7 +98,7 @@ def create_fns(input, in_signs, Ds, x, m0, m1, m2, batch_in_signs, alpha=0.1,
     cst = 0.5 * (Ds[0] + Ds[-1]) * T.log(2 * np.pi)
 
     loss = cst + 0.5 * Ds[-1] * log_sigma2 + inner / sigma2\
-            + 0.5 * loss_2 / sigma2 + 0.5*loss_z
+            + 0.5 * loss_2 / sigma2 + 0.5 * loss_z
 
     mean_loss = loss.mean()
     adam = sj.optimizers.NesterovMomentum(mean_loss, Ws + bs, lr, 0.9)
@@ -157,7 +157,7 @@ def create_H(M):
     K, D = M.shape
     A = np.copy(M)
     for i in range(D - K):
-        A, b = np.vstack((A, np.ones((1,D)))), np.zeros(K + 1 + i)
+        A, b = np.vstack((A, np.random.randn(1, D))), np.zeros(K + 1 + i)
         b[-1] = 1
         vec = lstsq(A, b, rcond=None)[0]
         A[-1] = vec / np.linalg.norm(vec, 2)
@@ -263,40 +263,15 @@ def F(x, sigma, a, mu, cov):
     return value
 
 
-def Phi_0(lower, cov):
-    return mvstdnormcdf(lower, cov)
 
-
-def Phi1_0(lower, cov):
-    """compute the first moment"""
-
-    D = len(lower)
-    f = np.zeros(D)
-    valid = np.nonzero(np.isfinite(lower))[0]
-
-    for k, low in zip(valid, lower[valid]):
-
-        keeping = np.arange(D) != k
-        cov_mk = cov[keeping, k]
-        cov_ = np.delete(np.delete(cov, k, 0), k, 1)
-        covk = cov_ - np.outer(cov_mk, cov_mk) / cov[k, k]
-
-        muk = cov_mk * low / cov[k, k]
-
-        f[k] = F(low, cov[k, k], lower[keeping], muk, covk)
-
-    return np.matmul(cov, f)
-
-
-
-def Phi2_0(lower, cov):
+def get_F_G(lower, cov):
     """compute the moment 1 given a set of planes inequality
     smaller of equal to d
     """
 
     D = len(lower)
     f = np.zeros(D)
-    ff = np.zeros((D, D))
+    g = np.zeros((D, D))
 
     valid = np.nonzero(np.isfinite(lower))[0]
 
@@ -309,7 +284,7 @@ def Phi2_0(lower, cov):
         covk = cov_ - np.outer(cov[keeping, k], cov[k, keeping]) / cov[k, k]
         muk = cov[keeping, k] * low / cov[k, k]
 
-        f[k] = F(low, cov[k, k], lower[keeping], muk, covk) * low
+        f[k] = F(low, cov[k, k], lower[keeping], muk, covk)# * low
 
         for q, lowq in zip(valid, lower[valid]):
             if q == k or len(lower) <= 2:
@@ -327,39 +302,41 @@ def Phi2_0(lower, cov):
             covkq = cov_ - cov2.dot(inv_cov22.dot(cov2.T))
             mukq = cov2.dot(inv_cov22.dot(akq))
 
-            ff[k, q] = F(akq, cov22, lower[keeping], mukq, covkq)
+            g[k, q] = F(akq, cov22, lower[keeping], mukq, covkq)
 
-    first = (f + (cov * ff).sum(1)) / np.diag(cov)
-    return (cov * first).dot(cov.T) + Phi_0(lower, cov) * cov
-
+    return f, g
 
 
-def cones_to_rectangle(ineqs, mu, cov):
+
+def cones_to_rectangle(ineqs, cov):
 
     # first the general case without constraints
     if ineqs is None:
         lower = np.array([-np.inf] * len(cov))
         return lower, cov, np.eye(len(lower))
 
-    l2 = np.linalg.norm(ineqs[:, 1:], 2, 1)
-    ineqs = ineqs[l2 > 0]
-    ineqs /= np.linalg.norm(ineqs[:, 1:], 2, 1, keepdims=True)
+#    l2 = np.linalg.norm(ineqs[:, 1:], 2, 1)
+#    ineqs = ineqs[l2 > 0]
+#    ineqs /= np.linalg.norm(ineqs[:, 1:], 2, 1, keepdims=True)
 
-    A, b = ineqs[:, 1:], -ineqs[:, 0]
+    A, b = ineqs[:, 1:], - ineqs[:, 0]
     D = A.shape[1] - A.shape[0]
     if D == 0:
         R = A
     else:
-        #R = np.vstack([A, create_H(A)])
-        R = np.vstack([A, create_H(A).dot(np.linalg.inv(cov))])
-    b = np.concatenate([b, np.array([-np.inf] * D)])
-    if mu.ndim == 1:
-        l_c = b - R.dot(mu)
-    elif mu.ndim == 2:
-        l_c = b - np.einsum('sd,nd->ns',R, mu)
+        R = np.vstack([A, create_H(A)])
+#        R = np.vstack([A, create_H(A).dot(np.linalg.inv(cov))])
     cov_c = R.dot(cov.dot(R.T))
-    
-    return l_c, cov_c, R
+    b = np.concatenate([b, np.array([-np.inf] * D)])
+    return b, cov_c, R
+#    if mu.ndim == 1:
+#        l_c = b - R.dot(mu)
+#    elif mu.ndim == 2:
+#        l_c = b - np.einsum('sd,nd->ns',R, mu)
+#
+#    cov_c = R.dot(cov.dot(R.T))
+#    
+#    return l_c, cov_c, R
 
 
 def simplex_to_cones(vertices):
@@ -385,28 +362,29 @@ def simplex_to_cones(vertices):
 #######################################################
 
 
-def mu_sigma(x, A, b, sigma_z, sigma_x):
+def mu_sigma(x, A, b, cov_z, cov_x):
     x_ = x[None, :] if x.ndim == 1 else x
 
-    inv_sigma_x = np.linalg.inv(sigma_x) if x_.shape[1] > 1 else 1/sigma_x
-    inv_sigma_z = np.linalg.inv(sigma_z) if x_.shape[1] > 1 else 1/sigma_z
+    inv_cov_x = np.linalg.inv(cov_x) if x_.shape[1] > 1 else 1/cov_x
+    inv_cov_z = np.linalg.inv(cov_z) if x_.shape[1] > 1 else 1/cov_z
 
     if A.ndim == 3:
-        isigma_w = inv_sigma_z + np.einsum('nds,dk,nkz->nsz',A, inv_sigma_x, A)
+        inv_cov_w = inv_cov_z + np.einsum('nds,dk,nkz->nsz',A, inv_cov_x, A)
     else:
-        isigma_w = inv_sigma_z + A.T.dot(inv_sigma_x.dot(A))
+        inv_cov_w = inv_cov_z + A.T.dot(inv_cov_x.dot(A))
 
-    sigma_w = np.linalg.inv(isigma_w) if isigma_w.ndim > 1 else 1/isigma_w
+    cov_w = np.linalg.inv(inv_cov_w) if inv_cov_w.ndim > 1 else 1/inv_cov_w
     
     if A.ndim == 3:
-        mu_w = np.einsum('nsk,Nnk->Nns', sigma_w, np.einsum('nds,dk,Nnk->Nns',
-                                        A, inv_sigma_x, x_[:, None, :] - b))
+        mu_w = np.einsum('nsk,Nnk->Nns', cov_w, np.einsum('nds,dk,Nnk->Nns',
+                                        A, inv_cov_x, x_[:, None, :] - b))
     else:
-        mu_w = np.einsum('sk,Nk->Ns', sigma_w, np.einsum('ds,dk,Nk->Ns',
-                                    A, inv_sigma_x, x_[:, None, :] - b))
+        mu_w = np.einsum('sk,Nk->Ns', cov_w, np.einsum('ds,dk,Nk->Ns',
+                                    A, inv_cov_x, x_[:, None, :] - b))
+
     mu_w = mu_w[0] if x.ndim == 1 else mu_w
     
-    return mu_w, sigma_w
+    return mu_w, cov_w
 
 
 ####################################################
@@ -416,72 +394,66 @@ def mu_sigma(x, A, b, sigma_z, sigma_x):
 #
 #####################################################
 
-def phis_w(ineqs, mu_w, sigma_w):
+def phis_w(ineq_w, mu, cov_w):
 
-    if ineqs.shape[0] <= ineqs.shape[1]-1:
-        l_c, cov_c, R_c = cones_to_rectangle(ineqs, mu_w, sigma_w)
-    
-        invR = np.linalg.inv(R_c)
-    
-        Phi_w = Phi_0(l_c, cov_c)
-        Phi1_w = invR.dot(Phi1_0(l_c, cov_c))
-        Phi2_w = invR.dot(Phi2_0(l_c, cov_c).dot(invR.T))\
-                + np.outer(Phi1_w, mu_w) + np.outer(mu_w, Phi1_w)\
-                + np.outer(mu_w, mu_w) * Phi_w
+    ineqs = ineq_w + 0.
+    ineqs[:, 0] += ineqs[:, 1:].dot(mu)
+    phi0 = 0.
+    phi1 = 0.
+    phi2 = 0.
 
-        return Phi_w, Phi1_w + mu_w * Phi_w, Phi2_w
+    ready = ineqs.shape[0] <= ineqs.shape[1]-1
 
-    Phi_w = 0.
-    Phi1_w = 0.
-    Phi2_w = 0.
-#    if ineqs.shape[1] == 2:
-#        knots = - ineqs[:, 0] / ineqs[:, 1]
-#        v = np.sort(knots).reshape((-1, 1))
-#    else:
-    v = np.array(get_vertices(ineqs))[:, 1:]
-    for simplex in get_simplices(v):
-        for ineqs_c, s in zip(*simplex_to_cones(v[simplex])):
+    if ready:
+        simplices = [range(len(ineqs))]
+    else:
+        v = np.array(get_vertices(ineqs))[:, 1:]
+        simplices = get_simplices(v)
+    for simplex in simplices:
+
+        cones = [(ineqs, 1)] if ready else zip(*simplex_to_cones(v[simplex]))
+
+        for ineqs_c, s in cones:
+
+            l_c, cov_c, R_c = cones_to_rectangle(ineqs_c, cov_w)
         
-            l_c, cov_c, R_c = cones_to_rectangle(ineqs_c, mu_w, sigma_w)
-        
-            invR = np.linalg.inv(R_c)
+            f, G = get_F_G(l_c, cov_c)
+    
+            phi0 += s * mvstdnormcdf(l_c, cov_c)
+            phi1 += s * R_c.T.dot(f)
+            M = (np.nan_to_num(l_c) * f - (cov_c * G).sum(1)) / np.diag(cov_c)
+            phi2 += s * np.einsum('dk,db,bv->kv', R_c, G + np.diag(M), R_c)
 
-            Phi_w += s * Phi_0(l_c, cov_c)
-            Phi1_w += s * invR.dot(Phi1_0(l_c, cov_c))
-            Phi2_w += s * invR.dot(Phi2_0(l_c, cov_c).dot(invR.T))
- 
-    Phi2_w += np.outer(Phi1_w, mu_w) + np.outer(mu_w, Phi1_w)\
-            + np.outer(mu_w, mu_w) * Phi_w
-    Phi1_w += mu_w * Phi_w
-    return Phi_w, Phi1_w, Phi2_w
+    phi1 = cov_w.dot(phi1)
+    phi2 = cov_w * phi0 + np.einsum('dk,dv,vl->kl',cov_w, phi2, cov_w)
+
+    return phi0, phi1, phi2
 
 
-def phis_all(ineqs, mu_all, sigma_all):
-    Phi0_all = []
-    Phi1_all = []
-    Phi2_all = []
-    if mu_all.ndim == 3:
-        mu_all = mu_all.transpose((1, 0, 2))
-    for ineq, mu, sigma in zip(ineqs, mu_all, sigma_all):
-        out = phis_w(ineq, mu, sigma)
-        Phi0_all.append(out[0])
-        Phi1_all.append(out[1])
-        Phi2_all.append(out[2])
-    return np.array(Phi0_all), np.array(Phi1_all), np.array(Phi2_all)
+def phis_all(ineqs, mu_all, cov_all):
+
+    phi0 = np.zeros(len(ineqs))
+    phi1 = np.zeros((len(ineqs), cov_all.shape[-1]))
+    phi2 = np.zeros(phi1.shape + (cov_all.shape[-1],))
+
+    for i, (ineq, mu, cov) in enumerate(zip(ineqs, mu_all, cov_all)):
+        phi0[i], phi1[i], phi2[i] = phis_w(ineq, mu, cov)
+
+    return phi0, phi1, phi2
 
 
 ############################# kappa computations
 
-def log_kappa(x, sigma_x, sigma_z, A, b):
+def log_kappa(x, cov_x, cov_z, A, b):
     if b.ndim == 1:
-        cov = sigma_x + np.einsum('ds,sp,kp->dk',A, sigma_z, A)
+        cov = cov_x + np.einsum('ds,sp,kp->dk',A, cov_z, A)
         return multivariate_normal.logpdf(x, mean=b, cov=cov)
 
-    cov = sigma_x + np.einsum('nds,sp,nkp->ndk',A, sigma_z, A)
-    kappas = np.array([multivariate_normal.logpdf(x, mean=d, cov=c)
-                       for d, c in zip(b, cov)])
+    cov = cov_x + np.einsum('nds,sp,nkp->ndk',A, cov_z, A)
+    kappas = np.array([multivariate_normal.logpdf(x, mean=b[i], cov=cov[i])
+                                                       for i in range(len(b))])
     if kappas.ndim == 2:
-        return kappas.transpose((1, 0))
+        return kappas.T
     return kappas
 
 
@@ -489,17 +461,25 @@ def log_kappa(x, sigma_x, sigma_z, A, b):
 def posterior(z, regions, x, As, Bs, cov_z, cov_x, input2signs):
     mu, cov = mu_sigma(x, As, Bs, cov_z, cov_x)
     kappas = np.exp(log_kappa(x, cov_x, cov_z, As, Bs))
-    phis0 = phis_all([regions[r]['ineq'] for r in regions], mu, cov)[0]
- 
+    phis = phis_all([regions[r]['ineq'] for r in regions], mu, cov)
     indices = find_region(z, regions, input2signs)
-
     output = np.zeros(len(indices))
     for k in np.unique(indices):
         w = indices == k
         output[w] = multivariate_normal.pdf(z[w], mean=mu[k], cov=cov[k])
+    px = (kappas * phis[0]).sum()
+    output *= kappas[indices] / px
 
-    output *= kappas[indices] / (kappas * phis0).sum()
-    return output
+    alphas = kappas / px
+
+    m0_w = phis[0] * alphas
+    m1_w = phis[1] * alphas[:, None]
+    m2_w = phis[2] * alphas[:, None, None] + np.einsum('nd,nk,n->ndk', mu, mu, m0_w)\
+            + np.einsum('nd,nk->ndk', mu, m1_w) + np.einsum('nd,nk->ndk', mu, m1_w).transpose((0, 2, 1))
+    m1_w += np.einsum('nd,n->nd', mu, m0_w)
+
+
+    return output, m0_w, m1_w, m2_w
 
 
 
@@ -510,26 +490,28 @@ def marginal_moments(x, regions, sigma_x, sigma_z):
     As = np.array([regions[s]['Ab'][0] for s in regions])
     Bs = np.array([regions[s]['Ab'][1] for s in regions])
 
-    mus, sigmas = mu_sigma(x, As, Bs, sigma_z, sigma_x) #(N R D) (R D D)
-    kappas = log_kappa(x, sigma_x, sigma_z, As, Bs) #(N R)
+    mus, covs = mu_sigma(x, As, Bs, sigma_z, sigma_x) #(R D) (D D)
+
+    log_kappas = log_kappa(x, cov_x, cov_z, As, Bs) #(R)
+    
     ineqs = np.array([regions[r]['ineq'] for r in regions])
     
-    Phis_0, Phis_1, Phis_2 = phis_all(ineqs, mus, sigmas)
+    phis = phis_all(ineqs, mus, covs)
 
-    px = (1e-25 + np.exp(kappas) * Phis_0).sum()
-    alphas = np.exp(kappas) / px#(1e-18 + np.exp(kappas) * Phis_0).sum()
-    m0_w = Phis_0 * alphas
-    m1_w = Phis_1 * alphas[:, None]
-    m2_w = Phis_2 * alphas[:, None, None]
-
-#    try:
-#    w = Phis_0 > 0
-#    px = lse(kappas[w] + np.log(Phis_0[w]))
-#    except:
-#        px = 0
-    
+    p0 = np.where(phis[0] > 0, phis[0], 1)
+    px = lse(np.nan_to_num(log_kappas + np.log(phis[0])))
+#    print(log_kappas.min(), log_kappas.max(), log_kappas.mean())
+    alphas = np.exp(log_kappas)/(np.exp(log_kappas)*phis[0]).sum()
+#    alphas = np.where(px > 1e-2, alphas, 0)
+#    print('logkappa', log_kappas.min(), log_kappas.max())
+#    print('p0', phis[0].min(), phis[0].max())
+#    print('p1', phis[1].min(), phis[1].max())
+    print('alpha', alphas.min(), alphas.max())
+    m0_w = phis[0] * alphas#softmax(np.nan_to_num(log_kappas + np.log(phis[0])))
+    m1_w = phis[1] * alphas[:, None]
+    m2_w = phis[2] * alphas[:, None, None] + np.einsum('nd,nk,n->ndk', mus, mus, m0_w) + np.einsum('nd,nk->ndk', mus, m1_w) + np.einsum('nd,nk->ndk', mus, m1_w).transpose((0, 2, 1))
+    m1_w += np.einsum('nd,n->nd', mus, m0_w)
     return px, m0_w, m1_w, m2_w
-
 
 
 ############################# evidence

@@ -16,7 +16,7 @@ import networks
 from matrc import *
 
 
-Ds = [1, 16, 16, 2]
+Ds = [1, 6, 2]
 mu_z = np.zeros(Ds[0])
 sigma_z = np.eye(Ds[0])
 
@@ -38,11 +38,11 @@ for ss in [0.5, 0.2, 0.5]:
     sigma_x = np.eye(Ds[-1]) * ss
     for i in range(5):
         fig = plt.figure(figsize=(5,5))
-        model =  networks.create_fns(BS, R, Ds, 0, var_x = ss**2)
+        model =  networks.create_fns(BS, R, Ds, 0, var_x = np.ones(2) * ss**2)
     
         output, A, b, inequalities, signs = model['input2all'](np.random.randn(Ds[0]))
     
-        regions = utils.search_region(model['signs2q'], model['signs2Ab'], signs)
+        regions = utils.search_region(model['signs2ineq'], model['signs2Ab'], signs)
     
         As = np.array([regions[s]['Ab'][0] for s in regions])
         Bs = np.array([regions[s]['Ab'][1] for s in regions])
@@ -60,7 +60,7 @@ for ss in [0.5, 0.2, 0.5]:
         ax = plt.gca()
         ax.legend()
     
-        N = 25
+        N = 15
         X0, X1 = predictions[:, 0].min(), predictions[:, 0].max()
         Y0, Y1 = predictions[:, 1].min(), predictions[:, 1].max()
         X0 -= 0.5
@@ -80,6 +80,7 @@ for ss in [0.5, 0.2, 0.5]:
         p = list()
         cov_x = np.eye(2) * model['varx']()
         for xx in tqdm(xxx):
+            print(regions)
             p.append(utils.marginal_moments(xx, regions, cov_x, np.eye(1))[0])
         p = np.array(p).reshape((N, N))
     

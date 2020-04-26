@@ -7,13 +7,13 @@ import symjax.tensor as T
 import utils
 
 
-cov_b = 20
-cov_W = 20
+cov_b = 200
+cov_W = 200
 
 def init_weights(Ds, seed):
     np.random.seed(seed)
-    Ws = [sj.initializers.normal((j, i)) for j, i in zip(Ds[1:], Ds[:-1])]
-    bs = [sj.initializers.normal((j,)) for j in Ds[1:]]
+    Ws = [sj.initializers.glorot((j, i)) for j, i in zip(Ds[1:], Ds[:-1])]
+    bs = [sj.initializers.normal((j,))/3 for j in Ds[1:]]
     return Ws, bs
 
 
@@ -104,6 +104,7 @@ def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002):
  
     z = mu + T.exp(0.5 * logvar) * T.random.randn((batch_size, Ds[0]))
     z_ph = T.Placeholder((batch_size, Ds[0]), 'float32')
+
     # DECODER
     Ws, bs = init_weights(Ds, seed)
 
@@ -221,19 +222,19 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
     
     prior = sum([(v**2).sum() for v in vs], 0.) / cov_b\
             + sum([(w**2).sum() for w in Ws], 0.) / cov_W
-
+    M2diag = T.diagonal(m2.sum(1), axis1=1, axis2=2)
     loss = - 0.5 * ((Ds[0] + Ds[-1]) * T.log(2 * np.pi) + T.log(var_x).sum()\
                                                  + T.log(var_z).sum())\
            - 0.5 * T.sum((X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1) / var_x, 1)\
-            - 0.5 * T.trace(m2.sum(1), axis1=1, axis2=2) - 0.5 * prior
+            - 0.5 * T.sum(M2diag / var_z, 1) - 0.5 * prior
     mean_loss = - loss.mean()
     adam = sj.optimizers.NesterovMomentum(mean_loss, Ws, lr, 0.1)
 
     # update of var_x
     update_varx = (X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1).mean()\
                     * T.ones(Ds[-1])
-    update_varx = var_x
-    ppvar_x = update_varx / update_varx.min()
+    update_varz = M2diag.mean() * T.ones(Ds[0])
+#    ppvar_x = update_varx / update_varx.min()
     # update for biases
     FQ = get_forward(Ws, relu_mask(Qs, leakiness))
     update_vs = []
@@ -253,10 +254,10 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
 
         # compute the residual and apply sigma
         error = (T.einsum('Nd,Nn->nNd', X, m0) - A_contrib - b_contrib)
-        Error = T.einsum('nds,nNd->s', FQ[i], error / update_varx) / batch_size
+        Error = T.einsum('nds,nNd->s', FQ[i], error / var_x)
 
         # compute the whitening matrix
-        whiten = T.einsum('ndc,d,nds,Nn->cs', FQ[i], 1/update_varx, FQ[i], m0) / batch_size + T.eye(Ds[i + 1]) / cov_b
+        whiten = T.einsum('ndc,d,nds,Nn->cs', FQ[i], 1/var_x, FQ[i], m0) + batch_size * T.eye(Ds[i + 1]) / cov_b
 
         update_vs.append(T.matmul(T.linalg.inv(whiten), Error))
  
@@ -264,30 +265,30 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
     update_Ws = []
     for i in range(len(Ws)):
         
-        U = T.einsum('nds,d,ndc->nsc', FQ[i], 1/ppvar_x, FQ[i])
+        U = T.einsum('nds,d,ndc->nsc', FQ[i], 1/var_x, FQ[i])
 
         if i == 0:
             V = m2.mean(0)
         else:
-            nAQs, nbQs = get_Abs(update_Ws[:i] + Ws[i:], update_vs, relu_mask(Qs, leakiness))
+            nAQs, nbQs = get_Abs(update_Ws[:i] + Ws[i:], vs, relu_mask(Qs, leakiness))
             V1 = T.einsum('nd,nq,Nn->Nndq', nbQs[i-1], nbQs[i-1], m0)
             V2 = T.einsum('nds,nqc,Nnsc->Nndq', nAQs[i-1], nAQs[i-1], m2)
             V3 = T.einsum('nds,nq,Nns->Nndq', nAQs[i-1], nbQs[i-1], m1)
             V4 = V3.transpose((0, 1, 3, 2))
             mask = relu_mask(Qs[i-1], leakiness)
-            V = T.einsum('nd,Nndq,nq->ndq', mask, V1 + V2 + V3 + V4, mask) / batch_size
+            V = T.einsum('nd,Nndq,nq->ndq', mask, V1 + V2 + V3 + V4, mask)
 
         whiten = T.stack([T.kron(U[n], V[n].transpose())
                           for n in range(V.shape[0])])
         print(U, V, whiten)
-        whiten_inv = T.linalg.inv(whiten.sum(0) + update_varx.min()*T.eye(Ds[i] * Ds[i + 1]) / cov_W)
+        whiten_inv = T.linalg.inv(whiten.sum(0) + batch_size * T.eye(Ds[i] * Ds[i + 1]) / cov_W)
 
         # now we forward each bias to the x-space
-        separated_bs = T.stack([T.einsum('nds,s->nd', FQ[u], update_vs[u])
+        separated_bs = T.stack([T.einsum('nds,s->nd', FQ[u], vs[u])
                                             for u in range(i, len(FQ))])
 
         # sum the biases and apply the m0 scaling
-        residual = (X[:, None, :] - separated_bs.sum(0)) / ppvar_x
+        residual = (X[:, None, :] - separated_bs.sum(0)) / var_x
 
         if i == 0:
             rhs = m1
@@ -296,17 +297,23 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
             rhs2 = T.einsum('nd,Nn->Nnd', nbQs[i-1], m0)
             rhs = T.einsum('nd,Nnd->Nnd', mask, rhs1 + rhs2)
 
-        vector = T.einsum('ndc,Nnd,Nns->cs', FQ[i], residual, rhs) / batch_size
+        vector = T.einsum('ndc,Nnd,Nns->cs', FQ[i], residual, rhs)
 
         W = T.matmul(whiten_inv, vector.flatten()).reshape((Ds[i + 1], Ds[i]))
 
         update_Ws.append(W)
 
-    update_varz =  T.ones(Ds[0])
-    updates = dict(list(zip(vs, update_vs)))#dict([(var_x, update_varx)] + list(zip(vs, update_vs)))
-    updates = {**adam.updates, **updates}#dict(list(zip(vs, update_vs)))
+    updates = {**adam.updates}#dict(list(zip(vs, update_vs)))
     output = {'train':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
                                   updates=updates),
+              'update_sigma':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
+                                        updates = {var_x: update_varx}),
+#                                                var_z: update_varz}),
+              'update_vs':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
+                                      updates = dict(list(zip(vs, update_vs)))),
+              'loss':sj.function(Q, X, m0, m1, m2, outputs=mean_loss),
+              'update_Ws':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
+                                      updates = dict(list(zip(Ws, update_Ws)))),
               'signs2Ab': sj.function(q, outputs=[Aqs[-1][0], bqs[-1][0]]),
               'signs2ineq': sj.function(q, outputs=q_inequalities),
               'g': sj.function(x, outputs=maps[-1]),
@@ -332,43 +339,51 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
     return output
 
 
-def EM(model, DATA, n_iter):
+def EM(model, DATA, epochs, n_iter):
 
     if model['model'] == 'VAE':
         L = []
-        for i in range(n_iter):
-            L.append(model['train'](DATA))
+        for e in range(epochs):
+            for i in range(n_iter):
+                L.append(model['train'](DATA))
         return L
 
     S, D, R = model['S'], model['D'], model['R']
     z = np.random.randn(S)/10
-    output, A, b, inequalities, signs = model['input2all'](z)
-    
-    regions = utils.search_region(model['signs2ineq'], model['signs2Ab'], signs)
-    print('regions', len(regions))
 
-    varx = np.eye(D) * model['varx']()
-    varz = np.eye(S) * model['varz']()
-    print('varx', np.diag(varx))
-    print('varz', np.diag(varz))
-    m0 = np.zeros((DATA.shape[0], len(regions)))
-    m1 = np.zeros((DATA.shape[0], len(regions), S))
-    m2 = np.zeros((DATA.shape[0], len(regions), S, S))
-
-    for i, x in enumerate(DATA):
-        m0[i], m1[i], m2[i] = utils.marginal_moments(x, regions, varx, varz)[1:]
-
-    P = R - len(regions)
-    assert P >= 0
-    m0 = np.pad(m0, [[0, 0], [0, P]])
-    m1 = np.pad(m1, [[0, 0], [0, P], [0, 0]])
-    m2 = np.pad(m2, [[0, 0], [0, P], [0, 0], [0, 0]])
-    print(m0)
-    batch_signs = np.pad(np.array(list(regions.keys())), [[0, P], [0, 0]])
-    
+    m0 = np.zeros((DATA.shape[0], R))
+    m1 = np.zeros((DATA.shape[0], R, S))
+    m2 = np.zeros((DATA.shape[0], R, S, S))
     m_loss = []
-    for i in range(n_iter):
-        m_loss.append(model['train'](batch_signs, DATA, m0, m1, m2))
+    for e in range(epochs):
+        output, A, b, inequalities, signs = model['input2all'](z)
+        regions = utils.search_region(model['signs2ineq'], model['signs2Ab'],
+                                      signs)
+        batch_signs = np.pad(np.array(list(regions.keys())),
+                             [[0, R - len(regions)], [0, 0]])
+
+        print('regions', len(regions))
+    
+        varx = np.eye(D) * model['varx']()
+        varz = np.eye(S) * model['varz']()
+        print('varx', np.diag(varx))
+        print('varz', np.diag(varz))
+   
+        m0 *= 0
+        m1 *= 0
+        m2 *= 0
+        for i, x in enumerate(DATA):
+            m0[i, :len(regions)], m1[i, :len(regions)], m2[i, :len(regions)] = utils.marginal_moments(x, regions, varx, varz)[1:]
+    
+        print('after E step', model['loss'](batch_signs, DATA, m0, m1, m2))
+        for i in range(n_iter):
+            m_loss.append(model['train'](batch_signs, DATA, m0, m1, m2))
+            m_loss.append(model['update_vs'](batch_signs, DATA, m0, m1, m2))
+#            m_loss.append(model['update_sigma'](batch_signs, DATA, m0, m1, m2))
+        print('end M step', m_loss[-1])
+
+
+#    m_loss.append(model['update_sigma'](batch_signs, DATA, m0, m1, m2))
     return m_loss
 
 
