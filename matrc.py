@@ -10,7 +10,7 @@ rc('figure', figsize=(5, 5))
 rc('axes', grid=True, titlesize='x-large', labelsize='large',
         prop_cycle=cycler(color=['#348ABD', '#A60628', '#7A68A6', '#467821', 
             '#D55E00',  '#CC79A7', '#56B4E9', '#009E73', '#F0E442', '#0072B2']))
-rc('lines', linewidth=1.7, antialiased=True)
+rc('lines', linewidth=3, markersize=4, antialiased=True)
 rc('grid', alpha=0.3)
 rcParams['backend']='Agg'
 rc('image', cmap='plasma', origin='lower', aspect='auto', 

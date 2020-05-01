@@ -11,10 +11,11 @@ import networks
 from tqdm import tqdm
 from scipy.spatial import ConvexHull
 from multiprocessing import Pool
-
+import matplotlib
+from matplotlib.patches import Patch
 from matrc import *
 
-Ds = [1, 16, 16, 2]
+Ds = [1, 4, 16, 2]
 mu_z = np.zeros(Ds[0])
 sigma_z = np.eye(Ds[0])
 
@@ -24,19 +25,20 @@ in_signs = T.Placeholder((np.sum(Ds[1:-1]),), 'bool')
 R, BS = 40, 50
 
 if Ds[0] == 1:
-    xx = np.linspace(-3, 3, 500).reshape((-1, 1))
+    xx = np.linspace(-5, 5, 500).reshape((-1, 1))
 else:
-    xx = np.meshgrid(np.linspace(-3, 3, 100), np.linspace(-3, 3, 100))
+    xx = np.meshgrid(np.linspace(-5, 5, 100), np.linspace(-3, 3, 100))
     xx = np.vstack([xx[0].flatten(), xx[1].flatten()]).T
 
+ss = 0.05
 
-
-for ss in [1, 0.2, 0.5]:
-    np.random.seed(int(sys.argv[-1]) + 10)
-    for i in range(5):
+for seed in range(200):
+    np.random.seed(seed)
+    for i in range(1):
 
         fig = plt.figure(figsize=(5,5))
-        model = networks.create_fns(BS, R, Ds, 0, var_x=np.ones(Ds[-1]) * ss**2)
+        model = networks.create_fns(BS, R, Ds, seed, var_x=np.ones(Ds[-1]) * ss**2,
+                leakiness=0.01)
 
         z = np.random.randn(Ds[0])
         output, A, b, inequalities, signs = model['input2all'](z)
@@ -49,45 +51,33 @@ for ss in [1, 0.2, 0.5]:
         Bs = np.array([regions[s]['Ab'][1] for s in regions])
         
         predictions = model['sample'](200)
+
         noise = np.random.randn(*predictions.shape) * ss
 
+        # PLOT POSTERIOR
         vx = np.eye(2) * model['varx']()
+        p2, m20, m21, m22 = utils.posterior(xx, regions, outpute, As, Bs,
+                                            np.eye(1), vx, model['input2signs'])
+        exp = np.einsum('ns,nds->d', m21, As) + np.einsum('n,nd->d', m20, Bs)
+        mu = m21.sum()
 
-        p1, m10, m11, m12 = utils.posterior(xx, regions, output, As, Bs, np.eye(1), vx, model['input2signs'])
-        p2, m20, m21, m22 = utils.posterior(xx, regions, outpute, As, Bs, np.eye(1), vx, model['input2signs'])
+        muhat = np.average(xx[:,0], weights=p2)
+        print(muhat, mu)
+        print(np.average((xx[:,0])**2, weights=p2), m22.sum())
 
-        emp_mu1 = np.average(xx[:,0], weights=p1)
-        emp_mu2 = np.average(xx[:,0], weights=p2)
-        emp_var1 = np.average((xx[:,0])**2, weights=p1)
-        emp_var2 = np.average((xx[:,0])**2, weights=p2)
-
-        print(p1, p2)
-        print(m10.sum(), m20.sum(), np.average(np.ones_like(p1), weights=p1),
-                np.average(np.ones_like(p2), weights=p2))
-        print(m11.sum(), emp_mu1, m21.sum(), emp_mu2)
-
-        print(m12.sum(0), emp_var1, m22.sum(0), emp_var2)
-        adsf
         if Ds[0] == 1:
-#            plt.plot(xx, p1, label=r'$p(\mathbf{z}|g(\mathbf{z}_0))$')
-            plt.plot(xx, p2, label=r'$p(\mathbf{z}|g(\mathbf{z}_0)+\epsilon_0)$')
-            plt.axvline(z, color='k', label=r'$\mathbf{z}_0$')
-            plt.axvline(m21.sum(0), color='b', label='mu')
-            plt.axvline(emp_mu2, color='g', linestyle='--')
-            plt.plot([m21.sum(0)-np.sqrt(m22.sum(0)[0,0]),
-                        m21.sum(0)+np.sqrt(m22.sum(0)[0,0])],[1,1])
-            plt.plot([emp_mu2-np.sqrt(emp_var2),
-                        emp_mu2+np.sqrt(emp_var2)],[0.5,0.5])
-
-
+            plt.plot(xx, p2, label=r'$p(\mathbf{z}|\mathbf{x})$')
+            plt.axvline(mu, color='b', label='mean')
         else:
             plt.imshow((np.array(p)).reshape((N, N)), aspect='auto',
                         extent=[-L, L, -L, L], origin='lower')
         ax = plt.gca()
         ax.legend()
         plt.tight_layout()
-        plt.savefig('images/prior_{}_{}.png'.format(str(ss).replace('.', ''),i))
+        plt.savefig('images/prior_{}_{}.png'.format(seed, i))
         plt.close()
+
+        # PLOT DATA
 
         plt.figure(figsize=(5, 5))
         plt.scatter(predictions[:,0] + noise[:, 0],
@@ -95,13 +85,52 @@ for ss in [1, 0.2, 0.5]:
                     alpha=0.2)
         plt.scatter(predictions[:,0], predictions[:, 1], color='red', edgecolor='r',
                     alpha=0.2)
-        plt.scatter(output[0], output[1], color='k', marker='x', linewidth=4,
-                    label=r'$g(\mathbf{z}_0)$')
-        plt.scatter(outpute[0], outpute[1], color='k', linewidth=4,
-                    label=r'$g(\mathbf{z}_0)+\epsilon_0$')
+        plt.scatter(outpute[0], outpute[1], color='k',
+                    label=r'$\mathbf{x}$', linewidth=4)
+        plt.scatter(exp[0], exp[1], color='g', marker='x',  linewidth=4,
+                    label=r'$\mathbb{E}_{\mathbf{z}|\mathbf{x}}\left[\mathbf{x}\right]$')
+
+
+
     
         ax = plt.gca()
         ax.legend()
         plt.tight_layout()
-        plt.savefig('images/samples_{}_{}.png'.format(str(ss).replace('.', ''),i))
+        plt.savefig('images/samples_{}_{}.png'.format(seed, i))
         plt.close()
+
+        # PLOT DISTRIBTUION
+        N = 30
+        X0, X1 = predictions[:, 0].min(), predictions[:, 0].max()
+        Y0, Y1 = predictions[:, 1].min(), predictions[:, 1].max()
+        X0 -= 0.3
+        X1 += 0.3
+        Y0 -= 0.3
+        Y1 += 0.3
+        
+        xxx = np.meshgrid(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N))
+        xxx = np.hstack([xxx[0].flatten()[:, None], xxx[1].flatten()[:, None]])
+        
+        p = list()
+        cov_x = np.eye(2) * model['varx']()
+        for xxxx in tqdm(xxx):
+            p.append(utils.marginal_moments(xxxx, regions, cov_x, np.eye(1))[0])
+        p = np.array(p).reshape((N, N))
+    
+        fig = plt.figure()
+        plt.imshow(np.exp(p), extent=[X0, X1, Y0, Y1])
+        plt.contour(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N),np.exp(p), 8,
+                    linewidths = 0.45, colors = 'w')
+        cmap = matplotlib.cm.get_cmap('plasma')
+        elements = [Patch(facecolor=cmap(0), edgecolor='k', label='0'),
+                    Patch(facecolor=cmap(1.), edgecolor='k',
+                          label=str(np.round(np.exp(p).max(),2)))]
+        ax = plt.gca()
+        ax.legend(handles=elements)
+    
+        #formatit(X0, X1, Y0, Y1)
+        plt.xlim([X0, X1])
+        plt.ylim([Y0, Y1])
+        plt.savefig('images/proba_{}_{}.png'.format(seed, i))
+ 
+

@@ -7,8 +7,8 @@ import symjax.tensor as T
 import utils
 
 
-cov_b = 200
-cov_W = 200
+cov_b = 2000
+cov_W = 2000
 
 def init_weights(Ds, seed):
     np.random.seed(seed)
@@ -229,8 +229,8 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
     loss = - 0.5 * ((Ds[0] + Ds[-1]) * T.log(2 * np.pi) + T.log(var_x).sum()\
                                                  + T.log(var_z).sum())\
            - 0.5 * T.sum((X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1) / var_x, 1)\
-            - 0.5 * T.sum(M2diag / var_z, 1) - 0.5 * prior
-    mean_loss = - loss.mean()
+            - 0.5 * T.sum(M2diag / var_z, 1)
+    mean_loss = - loss.mean() + 0.5 * prior
     adam = sj.optimizers.NesterovMomentum(mean_loss, Ws, lr, 0.1)
 
     ############################################################################
@@ -315,8 +315,8 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
     output = {'train':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
                                   updates=updates),
               'update_sigma':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
-                                        updates = {var_x: update_varx}),
-#                                                var_z: update_varz}),
+                                        updates = {var_x: update_varx,
+                                                var_z: update_varz}),
               'update_vs':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
                                       updates = dict(list(zip(vs, update_vs)))),
               'loss':sj.function(Q, X, m0, m1, m2, outputs=mean_loss),

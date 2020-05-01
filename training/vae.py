@@ -16,7 +16,7 @@ from matrc import *
 
 np.random.seed(int(sys.argv[-2]) + 10)
 
-Ds = [1, 4, 2]
+Ds = [1, 6, 2]
 R, BS = 100, 250
 
 if sys.argv[-1] == 'VAE':
@@ -32,11 +32,11 @@ plt.scatter(X[:, 0] + noise[:, 0], X[:, 1] + noise[:, 1])
 plt.savefig('ori.png')
 plt.close()
  
-DATA = np.random.randn(BS, Ds[-1])
-DATA /= np.linalg.norm(DATA, 2, 1, keepdims=True)
+#DATA = np.random.randn(BS, Ds[-1])
+#DATA /= np.linalg.norm(DATA, 2, 1, keepdims=True)
 
-#DATA = np.linspace(-3, 3, BS)
-#DATA = np.vstack([DATA, np.cos(DATA*2)]).T
+DATA = np.linspace(-3, 3, BS)
+DATA = np.vstack([DATA, np.cos(DATA*2)]).T
 
 #DATA = np.random.randn(BS) * 3
 #DATA = np.vstack([DATA * np.cos(DATA), DATA * np.sin(DATA)]).T
@@ -45,11 +45,11 @@ DATA += np.random.randn(BS, Ds[-1]) * 0.1
 
 DATA -= DATA.mean(0)
 DATA /= DATA.max(0)
-DATA *= 1
+DATA *= 3
 
 L = []
 for iter in tqdm(range(250)):
-    L.append(networks.EM(model, DATA, 1, 20, iter>5)[-1:])
+    L.append(networks.EM(model, DATA, 1, 20, 1)[-1:])
 
 #    print(L[-1])
 #    print(L[-1][0], L[-1][-1])
