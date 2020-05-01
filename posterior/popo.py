@@ -32,7 +32,7 @@ else:
 
 ss = 0.05
 
-for seed in range(200):
+for seed in [37, 146, 53, 187, 79]:
     np.random.seed(seed)
     for i in range(1):
 
