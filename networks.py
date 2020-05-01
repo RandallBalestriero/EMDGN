@@ -10,10 +10,10 @@ import utils
 cov_b = 2000
 cov_W = 2000
 
-def init_weights(Ds, seed):
+def init_weights(Ds, seed, scaler=1):
     np.random.seed(seed)
-    Ws = [sj.initializers.glorot((j, i)) for j, i in zip(Ds[1:], Ds[:-1])]
-    bs = [sj.initializers.normal((j,))/3 for j in Ds[1:]]
+    Ws = [sj.initializers.glorot((j, i)) * scaler for j, i in zip(Ds[1:], Ds[:-1])]
+    bs = [sj.initializers.normal((j,))/3 * scaler for j in Ds[1:]]
     return Ws, bs
 
 
@@ -92,7 +92,7 @@ def get_Abs(Ws, vs, Qs):
 
 
 
-def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002):
+def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1):
 
     x = T.Placeholder([batch_size, Ds[-1]], 'float32')
 
@@ -106,7 +106,7 @@ def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002):
     z_ph = T.Placeholder((batch_size, Ds[0]), 'float32')
 
     # DECODER
-    Ws, bs = init_weights(Ds, seed)
+    Ws, bs = init_weights(Ds, seed, scaler)
 
     Ws = [T.Variable(w) for w in Ws]
     bs = [T.Variable(b) for b in bs]
@@ -133,12 +133,13 @@ def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002):
 
     train = sj.function(x, outputs=loss, updates=opti.updates)
     g = sj.function(z_ph, outputs=h_ph[-1])
-    params = sj.function(outputs = Ws + bs + [logvar_x])
+    params = sj.function(outputs = Ws + bs + [T.exp(logvar_x) * T.ones(Ds[-1])])
     get_varx = sj.function(outputs = var_x)
 
 
     output = {'train': train, 'g':g, 'params':params}
     output['model'] = 'VAE'
+    output['BS'] = batch_size
     output['varx'] = get_varx
 
     def sample(n):
@@ -151,7 +152,7 @@ def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002):
 
 
 
-def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z = None):
+def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z = None, scaler=1):
 
     x = T.Placeholder((Ds[0],), 'float32')
     X = T.Placeholder((batch_size, Ds[-1]), 'float32')
@@ -165,7 +166,7 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
 
     cumulative_units = np.cumsum([0] + Ds[1:-1])
 
-    Ws, vs = init_weights(Ds, seed)
+    Ws, vs = init_weights(Ds, seed, scaler)
     Ws = [T.Variable(w, name='W' + str(l)) for l, w in enumerate(Ws)]
     vs = [T.Variable(v, name='v' + str(l)) for l, v in enumerate(vs)]
 
@@ -347,13 +348,39 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
     return output
 
 
+def NLL(model, DATA):
+
+
+    S, D, R = model['S'], model['D'], model['R']
+    z = np.random.randn(S)/10
+
+    m0 = np.zeros((DATA.shape[0], R))
+    m1 = np.zeros((DATA.shape[0], R, S))
+    m2 = np.zeros((DATA.shape[0], R, S, S))
+    m_loss = []
+    output, A, b, inequalities, signs = model['input2all'](z)
+    regions = utils.search_region(model['signs2ineq'], model['signs2Ab'],
+                                  signs)
+    batch_signs = np.pad(np.array(list(regions.keys())),
+                         [[0, R - len(regions)], [0, 0]])
+
+
+    varx = np.eye(D) * model['varx']()
+    varz = np.eye(S) * model['varz']()
+
+    for i, x in enumerate(DATA):
+        m0[i, :len(regions)], m1[i, :len(regions)], m2[i, :len(regions)] = utils.marginal_moments(x, regions, varx, varz)[1:]
+
+    return model['loss'](batch_signs, DATA, m0, m1, m2)
+
+
 def EM(model, DATA, epochs, n_iter, update_var=False):
 
     if model['model'] == 'VAE':
         L = []
         for e in range(epochs):
-            for i in range(n_iter):
-                L.append(model['train'](DATA))
+            for i in range(len(DATA) // model['BS']):
+                L.append(model['train'](DATA[i * model['BS']: (i + 1) * model['BS']]))
         return L
 
     S, D, R = model['S'], model['D'], model['R']

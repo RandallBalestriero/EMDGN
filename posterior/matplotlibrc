@@ -1,0 +1,54 @@
+#font.family : serif
+mathtext.fontset : cm
+
+text.usetex : True
+#text.hinting_factor : 8
+text.latex.preamble : \usepackage{amssymb}\usepackage{amsmath}
+
+xtick.labelsize : xx-large
+xtick.direction : out
+ytick.labelsize : xx-large
+ytick.direction : out
+
+xtick.major.size : 5
+ytick.major.size : 5
+xtick.major.width : 2
+ytick.major.width : 2
+
+axes.xmargin : 0.
+axes.edgecolor : C0C0C0
+axes.formatter.use_mathtext: False
+axes.grid : True
+axes.titlesize : x-large
+axes.labelsize : large
+axes.labelweight : bold
+
+lines.linewidth : 3
+lines.markersize : 11
+lines.markeredgecolor : grey
+lines.markeredgewidth  : 4
+lines.antialiased : True
+
+scatter.edgecolors : grey
+scatter.marker : o  
+
+
+grid.alpha : 0.3
+
+backend : Agg
+
+image.cmap : plasma
+image.origin : lower
+image.aspect : auto
+image.interpolation : bicubic
+
+legend.fancybox : True
+legend.framealpha : 0.6
+legend.fontsize : xx-large
+legend.handletextpad : 0.3
+legend.markerscale   : 0.8
+legend.handlelength : 0.7
+legend.handleheight  : 0.7
+
+figure.autolayout : True
+figure.figsize : 5, 5

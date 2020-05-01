@@ -13,7 +13,7 @@ from scipy.spatial import ConvexHull
 from multiprocessing import Pool
 import matplotlib
 from matplotlib.patches import Patch
-from matrc import *
+import matplotlib.font_manager
 
 Ds = [1, 4, 16, 2]
 mu_z = np.zeros(Ds[0])
@@ -30,7 +30,7 @@ else:
     xx = np.meshgrid(np.linspace(-5, 5, 100), np.linspace(-3, 3, 100))
     xx = np.vstack([xx[0].flatten(), xx[1].flatten()]).T
 
-ss = 0.05
+ss = 0.1
 
 for seed in [37, 146, 53, 187, 79]:
     np.random.seed(seed)
@@ -51,7 +51,13 @@ for seed in [37, 146, 53, 187, 79]:
         Bs = np.array([regions[s]['Ab'][1] for s in regions])
         
         predictions = model['sample'](200)
-
+        X0, X1 = predictions[:, 0].min(), predictions[:, 0].max()
+        Y0, Y1 = predictions[:, 1].min(), predictions[:, 1].max()
+        X0 -= 0.3
+        X1 += 0.3
+        Y0 -= 0.3
+        Y1 += 0.3
+        
         noise = np.random.randn(*predictions.shape) * ss
 
         # PLOT POSTERIOR
@@ -66,47 +72,37 @@ for seed in [37, 146, 53, 187, 79]:
         print(np.average((xx[:,0])**2, weights=p2), m22.sum())
 
         if Ds[0] == 1:
-            plt.plot(xx, p2, label=r'$p(\mathbf{z}|\mathbf{x})$')
-            plt.axvline(mu, color='b', label='mean')
+            plt.plot(xx, p2, label=r'$p(\boldsymbol{z}|\boldsymbol{x})$')
+            plt.plot([mu, mu], [-0.2, 0.2], color='g', label='mean')
         else:
-            plt.imshow((np.array(p)).reshape((N, N)), aspect='auto',
-                        extent=[-L, L, -L, L], origin='lower')
+            plt.imshow((np.array(p)).reshape((N, N)), extent=[-L, L, -L, L])
         ax = plt.gca()
         ax.legend()
-        plt.tight_layout()
-        plt.savefig('images/prior_{}_{}.png'.format(seed, i))
+        plt.savefig('images/prior_{}_{}.png'.format(seed, i+ int(ss > 0.05)))
         plt.close()
 
         # PLOT DATA
 
         plt.figure(figsize=(5, 5))
         plt.scatter(predictions[:,0] + noise[:, 0],
-                    predictions[:, 1] + noise[:, 1], color='blue', edgecolor='b',
+                    predictions[:, 1] + noise[:, 1], color='blue',
                     alpha=0.2)
-        plt.scatter(predictions[:,0], predictions[:, 1], color='red', edgecolor='r',
+        plt.scatter(predictions[:,0], predictions[:, 1], color='red',
                     alpha=0.2)
         plt.scatter(outpute[0], outpute[1], color='k',
-                    label=r'$\mathbf{x}$', linewidth=4)
-        plt.scatter(exp[0], exp[1], color='g', marker='x',  linewidth=4,
-                    label=r'$\mathbb{E}_{\mathbf{z}|\mathbf{x}}\left[\mathbf{x}\right]$')
+                    label=r'$\boldsymbol{x}$')
+        plt.scatter(exp[0], exp[1], color='g', marker='x',
+                    label=r'$\mathbb{E}_{\boldsymbol{z}|\boldsymbol{x}}\left[\boldsymbol{x}\right]$')
 
-
-
-    
         ax = plt.gca()
         ax.legend()
-        plt.tight_layout()
-        plt.savefig('images/samples_{}_{}.png'.format(seed, i))
+        plt.xlim([X0, X1])
+        plt.ylim([Y0, Y1])
+        plt.savefig('images/samples_{}_{}.png'.format(seed, i+ int(ss > 0.05)))
         plt.close()
 
         # PLOT DISTRIBTUION
         N = 30
-        X0, X1 = predictions[:, 0].min(), predictions[:, 0].max()
-        Y0, Y1 = predictions[:, 1].min(), predictions[:, 1].max()
-        X0 -= 0.3
-        X1 += 0.3
-        Y0 -= 0.3
-        Y1 += 0.3
         
         xxx = np.meshgrid(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N))
         xxx = np.hstack([xxx[0].flatten()[:, None], xxx[1].flatten()[:, None]])
@@ -119,7 +115,7 @@ for seed in [37, 146, 53, 187, 79]:
     
         fig = plt.figure()
         plt.imshow(np.exp(p), extent=[X0, X1, Y0, Y1])
-        plt.contour(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N),np.exp(p), 8,
+        plt.contour(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N), 1.9**p, 4,
                     linewidths = 0.45, colors = 'w')
         cmap = matplotlib.cm.get_cmap('plasma')
         elements = [Patch(facecolor=cmap(0), edgecolor='k', label='0'),
@@ -131,6 +127,6 @@ for seed in [37, 146, 53, 187, 79]:
         #formatit(X0, X1, Y0, Y1)
         plt.xlim([X0, X1])
         plt.ylim([Y0, Y1])
-        plt.savefig('images/proba_{}_{}.png'.format(seed, i))
+        plt.savefig('images/proba_{}_{}.png'.format(seed, i + int(ss > 0.05)))
  
 
