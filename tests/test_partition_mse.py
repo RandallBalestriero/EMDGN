@@ -7,18 +7,17 @@ import symjax.tensor as T
 import utils
 import networks
 from tqdm import tqdm
-import tabulate
 
 error1, error2 = [], []
-for Ds in [[2, 8, 8]]:
+for Ds in [[1, 8, 8]]:
     print(Ds)
     model = networks.create_fns(1, 1, Ds, 0, var_x=np.ones(Ds[-1]))
     
     x = np.random.randn(Ds[0])/10
     output, A, b, inequalities, signs = model['input2all'](x)
-    regions = utils.search_region(model['signs2q'], model['signs2Ab'],
+    regions = utils.search_region(model['signs2ineq'], model['signs2Ab'],
                                   signs)
-    
+    print(len(regions))    
     K = 100
     xx = [np.linspace(-10, 10, K)] * Ds[0]
     xx = np.meshgrid(*xx)

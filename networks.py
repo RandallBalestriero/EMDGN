@@ -7,12 +7,13 @@ import symjax.tensor as T
 import utils
 
 
-cov_b = 2000
-cov_W = 2000
+cov_b = 200
+cov_W = 200
 
 def init_weights(Ds, seed, scaler=1):
     np.random.seed(seed)
-    Ws = [sj.initializers.glorot((j, i)) * scaler for j, i in zip(Ds[1:], Ds[:-1])]
+    Ws = [sj.initializers.glorot((i, j)) * scaler for i, j in zip(Ds[1:], Ds[:-1])]
+    Ws[0][::2,:]=0
     bs = [sj.initializers.normal((j,))/3 * scaler for j in Ds[1:]]
     return Ws, bs
 
@@ -20,7 +21,7 @@ def init_weights(Ds, seed, scaler=1):
 def relu_mask(x, leakiness):
     if type(x) == list:
         return [relu_mask(xx, leakiness) for xx in x]
-    return T.where(x > 0, 1., leakiness)
+    return T.where(x >= 0, 1., leakiness)
 
 
 
@@ -76,9 +77,9 @@ def get_Abs(Ws, vs, Qs):
     
     """produces the pre activation feature maps of layer ell"""
 
-    N = Qs[-1].shape[0]
-    As = [Ws[0] * T.ones((N, 1, 1))]
-    bs = [vs[0] * T.ones((N, 1))]
+    n = Qs[-1].shape[0]
+    As = [Ws[0] * T.ones((n, 1, 1))]
+    bs = [vs[0] * T.ones((n, 1))]
 
     for i in range(len(Qs)):
         As.append(T.einsum('db,nb,nbs->nds', Ws[i + 1], Qs[i], As[-1]))
@@ -129,7 +130,7 @@ def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1):
     loss = - (px + kl).mean()
 
     variables = Ws + bs + sj.layers.get_variables(enc) + [logvar_x]
-    opti = sj.optimizers.Adam(loss, variables, lr)
+    opti = sj.optimizers.Adam(loss, lr, params=variables)
 
     train = sj.function(x, outputs=loss, updates=opti.updates)
     g = sj.function(z_ph, outputs=h_ph[-1])
@@ -228,11 +229,10 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
             + sum([(w**2).sum() for w in Ws], 0.) / cov_W
     M2diag = T.diagonal(m2.sum(1), axis1=1, axis2=2)
     loss = - 0.5 * ((Ds[0] + Ds[-1]) * T.log(2 * np.pi) + T.log(var_x).sum()\
-                                                 + T.log(var_z).sum())\
-           - 0.5 * T.sum((X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1) / var_x, 1)\
-            - 0.5 * T.sum(M2diag / var_z, 1)
+                         + T.log(var_z).sum()) - 0.5 * T.sum(M2diag / var_z, 1)\
+           - 0.5 * T.sum((X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1) / var_x, 1)
     mean_loss = - loss.mean() + 0.5 * prior
-    adam = sj.optimizers.NesterovMomentum(mean_loss, Ws, lr, 0.1)
+#    adam = sj.optimizers.NesterovMomentum(mean_loss, Ws, lr, 0.1, params=)
 
     ############################################################################
     # update of var_x
@@ -312,12 +312,11 @@ def create_fns(batch_size, R, Ds, seed, var_x, leakiness=0.1, lr=0.0002, var_z =
 
         update_Ws.append(W)
 
-    updates = {**adam.updates}#dict(list(zip(vs, update_vs)))
-    output = {'train':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
-                                  updates=updates),
-              'update_sigma':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
-                                        updates = {var_x: update_varx,
-                                                var_z: update_varz}),
+#    updates = {**adam.updates}#dict(list(zip(vs, update_vs)))
+    output = {'train':sj.function(Q, X, m0, m1, m2, outputs=mean_loss),
+              'update_var':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
+                                        updates = {var_x: update_varx}),
+#                                                var_z: update_varz}),
               'update_vs':sj.function(Q, X, m0, m1, m2, outputs=mean_loss,
                                       updates = dict(list(zip(vs, update_vs)))),
               'loss':sj.function(Q, X, m0, m1, m2, outputs=mean_loss),
@@ -394,11 +393,11 @@ def EM(model, DATA, epochs, n_iter, update_var=False):
         output, A, b, inequalities, signs = model['input2all'](z)
         regions = utils.search_region(model['signs2ineq'], model['signs2Ab'],
                                       signs)
+        print('regions', len(regions))
+ 
         batch_signs = np.pad(np.array(list(regions.keys())),
                              [[0, R - len(regions)], [0, 0]])
 
-        print('regions', len(regions))
-    
         varx = np.eye(D) * model['varx']()
         varz = np.eye(S) * model['varz']()
         print('varx', np.diag(varx))
@@ -417,7 +416,7 @@ def EM(model, DATA, epochs, n_iter, update_var=False):
             m_loss.append(model['update_vs'](batch_signs, DATA, m0, m1, m2))
             m_loss.append(model['update_Ws'](batch_signs, DATA, m0, m1, m2))
             if update_var:
-                m_loss.append(model['update_sigma'](batch_signs, DATA, m0, m1, m2))
+                m_loss.append(model['update_var'](batch_signs, DATA, m0, m1, m2))
         print('end M step', m_loss[-1])
 
 #    m_loss.append(model['update_sigma'](batch_signs, DATA, m0, m1, m2))

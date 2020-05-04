@@ -497,11 +497,18 @@ def marginal_moments(x, regions, cov_x, cov_z):
     ineqs = np.array([regions[r]['ineq'] for r in regions])
     
     phis = phis_all(ineqs, mus, covs)
-    px = lse(np.nan_to_num(log_kappas + np.log(phis[0])))
-    alphas = np.exp(log_kappas)/(np.exp(log_kappas)*phis[0]).sum()
-    m0_w = phis[0] * alphas
+    
+    px = lse(log_kappas + np.log(np.maximum(phis[0], 1e-34)))
+
+    renorm = (np.exp(log_kappas-log_kappas.max()) * phis[0]).sum()
+    alphas = np.exp(log_kappas - log_kappas.max()) / renorm
+
+    m0_w = softmax(np.log(np.maximum(phis[0], 1e-34)) + log_kappas)
     m1_w = phis[1] * alphas[:, None]
-    m2_w = phis[2] * alphas[:, None, None] + np.einsum('nd,nk,n->ndk', mus, mus, m0_w) + np.einsum('nd,nk->ndk', mus, m1_w) + np.einsum('nd,nk->ndk', mus, m1_w).transpose((0, 2, 1))
+    m2_w = phis[2] * alphas[:, None, None]\
+            + np.einsum('nd,nk,n->ndk', mus, mus, m0_w)\
+            + np.einsum('nd,nk->ndk', mus, m1_w)\
+            + np.einsum('nd,nk->nkd', mus, m1_w)
     m1_w += np.einsum('nd,n->nd', mus, m0_w)
     return px, m0_w, m1_w, m2_w
 

@@ -5,7 +5,7 @@ import utils
 
 
 mu = np.zeros(2)+0.3
-cov = np.array([[2.1, 0.3],[0.3, 0.8]])
+cov = np.array([[2.1, 0.3],[0.3, 0.8]]) * 0.0001
 
 
 m = cdd.Matrix([[30, 1., 0], [30, 0., 1.]])
