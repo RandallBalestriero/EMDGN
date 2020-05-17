@@ -28,7 +28,7 @@ np.random.seed(110)
 
 EPOCHS = 200
 Ds = [1] + [args.width] * args.depth + [2]
-R, BS = args.width * 4 * args.depth, 1000
+R, BS = args.width * 4 * args.depth, 500
 
 emt = networks.create_fns(BS, R, Ds, 1, var_x = np.ones(Ds[-1]),
                           lr=0.005, leakiness=args.leakiness)
@@ -58,11 +58,12 @@ for seed in range(10):
     
         # do the EM case
         model = networks.create_fns(BS, R, Ds, seed, var_x = np.ones(Ds[-1]) * 0.2,
+                        var_z = np.ones(Ds[0]) * 1,
                           lr=0.005, leakiness=args.leakiness, scaler=args.scale)
         L = []
         for iter in tqdm(range(EPOCHS)):
-            L.append(networks.EM(model, DATA, epochs=1, n_iter=200,
-                                 update_var=iter > 8)[-1])
+            L.append(networks.EM(model, DATA, epochs=1, n_iter=min(5+iter,200),
+                                 update_var=iter > 40)[-1])
 
         samples.append(model['sample'](200))
         losses.append(L)

@@ -13,7 +13,6 @@ from multiprocessing import Pool
 import matplotlib
 from matplotlib.patches import Patch
 import networks
-from matrc import *
 
 
 Ds = [1, 6, 2]

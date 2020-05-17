@@ -11,7 +11,7 @@ from tqdm import tqdm
 import symjax as sj
 import symjax.tensor as T
 from multiprocessing import Pool, Array
-import scipy
+
 import networks
 
 VERBOSE = 0
@@ -159,15 +159,19 @@ def flip(A, i):
     return A * sign
 
 def reduce_ineq(ineqs):
+    norms = set(np.nonzero(np.linalg.norm(ineqs, 2, 1) < 1e-8)[0])
     M = cdd.Matrix(ineqs)
     M.rep_type = cdd.RepType.INEQUALITY
-    I = list(set(range(len(ineqs))) - set(M.canonicalize()[1]))
+
+    I = list(set(range(len(ineqs))) - norms - set(M.canonicalize()[1]))
     return I
+
+ 
+
 
 def find_neighbours(signs2ineq, signs):
 
-    ineq = bound_ineq(signs2ineq(np.array(signs)))
-
+    ineq = signs2ineq(np.array(signs))
     I = reduce_ineq(ineq)
 
     # create the sign switching table
@@ -176,71 +180,43 @@ def find_neighbours(signs2ineq, signs):
 
     return F * signs
 
-def search_region_sample(input2signs):
-    z = np.random.randn(100000, 1) * 5
-    signs = []
-    for i in range(len(z)):
-        signs.append(input2signs(z[i]))
-    signs = set([tuple(a) for a in signs])
-    return signs
 
-
-
-def search_region(signs2ineq, signs2Ab, signs):
-    all_signs = set()
+def search_region(signs2ineq, signs2Ab, signs, max_depth=9999999999999):
+    S = dict()
+    # init
+    all_signs = []
     # init the to_visit
-    to_visit=set([tuple(signs)])
+    to_visit=[list(signs)]
     # search all the regions (their signs)
     while True:
-        if len(to_visit) == 0:
-            break
-        all_signs = all_signs.union(to_visit)
-        to_visit_after = set()
+        all_signs += to_visit
+        to_visit_after = []
         for s in to_visit:
-            
-            # find neighbour
-            ineqs = signs2ineq(np.array(s))
-            I = reduce_ineq(np.hstack([ineqs[:,-1:], ineqs[:,:-1]]))
-
-            # create the sign switching table
-            F = np.ones((len(I), len(s)))
-            F[np.arange(len(I)), I] = - 1
-            to_visit_after = to_visit_after.union(set([tuple(r) for r in F * s]))
-        to_visit = to_visit_after - all_signs
-
-    # now set up S
-    S = dict()
+            neighbours = find_neighbours(signs2ineq, s)
+            for n in neighbours:
+                a = np.any([np.array_equal(n,p) for p in to_visit_after])
+                b = np.any([np.array_equal(n,p) for p in to_visit])
+                c = np.any([np.array_equal(n,p) for p in all_signs])
+                if not (a + b + c):
+                    to_visit_after.append(n)
+        if len(to_visit_after) == 0:
+            break
+        to_visit = to_visit_after
+    # not set up S
     for s in all_signs:
-        ineq = bound_ineq(signs2ineq(s))
-        if get_vertices(ineq[:, :-1], ineq[:,-1]) is not None:
-            S[s] = {'ineq': ineq, 'Ab': signs2Ab(s)}
+        ineq = signs2ineq(s)
+        S[tuple(s)] = {'ineq': ineq[reduce_ineq(ineq)], 'Ab': signs2Ab(s)}
     return S
 
 
 
-def bound_ineq(ineq):
-    if ineq.shape[1] == 2 :
-        return np.vstack([ineq, np.array([[1, 5],[-1, 5]])])
-    else:
-        return np.vstack([ineq, np.array([[1, 0, -20],[0, 1, -20],
-                                         [-1, 0, -20],[0, -1, -20]])])
- 
 
-
-def get_vertices(A,b):
-    # input is of the form [A, b] s.t. Ax+b >= 0
+def get_vertices(inequalities):
     # create the matrix the inequalities are a matrix of the form
-    # [b, -A] from Ax<=b
-    if A.shape[1] == 1:
-        A_ = A[:, 0]
-        lower = np.max(-b[A_ > 0] / A_[A_ > 0])
-        upper = np.min(-b[A_ < 0] / A_[ A_ < 0])
-        if lower > upper:
-            return None
-        return np.array([lower, upper])
-    m = cdd.Matrix(np.hstack([b.reshape((-1,1)),  A]))
+    # [b, -A] from b-Ax>=0
+    m = cdd.Matrix(inequalities)
     m.rep_type = cdd.RepType.INEQUALITY
-    return np.sort(np.array(cdd.Polyhedron(m).get_generators())[:, 1])
+    return cdd.Polyhedron(m).get_generators()
 
 
 def mvstdnormcdf(lower, cov):
@@ -322,6 +298,9 @@ def get_F_G(lower, cov):
 
     for k in range(len(lower)):
 
+        if lower[k] == - np.inf:
+            continue
+
         f[k] = multivariate_normal.pdf(lower[k], cov=cov[k, k])
         if len(cov) > 1:
             mu_u, cov_u, low_no_u = mu_u_sigma_u(lower, cov, k)
@@ -362,7 +341,9 @@ def cones_to_rectangle(ineqs, cov):
         lower = np.array([-np.inf] * len(cov))
         return lower, np.eye(len(lower))
 
-    A, b = ineqs[:, :-1], ineqs[:, -1]
+    ineqs /= np.linalg.norm(ineqs[:, 1:], 2, 1, keepdims=True)
+
+    A, b = ineqs[:, 1:], - ineqs[:, 0]
     D = A.shape[1] - A.shape[0]
     if D == 0:
         R = A
@@ -419,60 +400,31 @@ def mu_sigma(x, A, b, cov_z, cov_x):
 #
 ####################################################
 
-def phis_w(ineq, mu, cov_w):
-
-    A = ineq[:, :-1]
-    B = ineq[:, -1]
+def phis_w(ineq_w, mu, cov_w):
 
     # instead of integrating a non centered gaussian on w 
     # we integrate a centered Gaussian on w-mu. This is equivalent to 
     # adding mu to the bias of the inequality system
-    B_mu = B + A.dot(mu)
+    ineqs = ineq_w + 0.
+    ineqs[:, 0] += ineqs[:, 1:].dot(mu)
 
-    if len(cov_w) > 1:
-        norm_vector = np.linalg.norm(ineq[:, :-1], axis=1, keepdims=True)
-        system = np.hstack([-A, -B_mu.reshape((-1, 1))])
-        c = np.zeros((A.shape[1] + 1,))
-        c[-1] = -1
-        res = scipy.optimize.linprog(c, A_ub=np.hstack((-A, norm_vector)), b_ub=B_mu)
-        inter = scipy.spatial.HalfspaceIntersection(system, res.x[:-1])
-        vertices = inter.dual_vertices
-        simplices = Delaunay(vertices).simplices
-    else:
-        vertices = get_vertices(A, B_mu)
-        phi0 = mvstdnormcdf(vertices[[0]], cov_w)\
-                - mvstdnormcdf(vertices[[1]], cov_w)
-        f1 = get_F_G(vertices[[0]], cov_w)[0]
-        f2 = get_F_G(vertices[[1]], cov_w)[0]
-
-        phi1 = cov_w * (f1 - f2)
-        phi2 = np.diag((vertices[[0]] * f1 - vertices[[1]] * f2) / cov_w)
-        phi2 = cov_w * phi0 + phi0 * mu ** 2 + phi2 * cov_w**2 + 2 * mu * phi1
-        phi1 += mu * phi0
-
-        return phi0, phi1, phi2
-
-    
     # we initialize the accumulators
     phi0, phi1, phi2 = 0., 0., 0.
+    print(ineqs / np.linalg.norm(ineqs[:, 1:], 2, 1, keepdims=True))
+    if ineqs.shape[0] <= ineqs.shape[1] - 1:
+        simplices = [range(len(ineqs))]
+    else:
+        v = np.array(get_vertices(ineqs))[:, 1:]
+        print(v)
+        simplices = get_simplices(v)
 
     for simplex in simplices:
 
-        if len(cov_w) == 1:
-            lows = vertices[[0]], vertices[[1]]
-            Rs = - np.ones((1, 1)), np.ones((1, 1))
-            signs = 1, -1
-        else:
-            if ineqs.shape[0] < ineqs.shape[1]:
-                low, Rs = cones_to_rectangle(ineqs, cov_w)
-                lows = [low]
-                Rs = [Rs]
-                signs = [1]
-            else: #TODO
-                cones = zip(*simplex_to_cones(vertices[simplex].reshape((-1,1))))
+        cones = [(ineqs, 1)] if ineqs.shape[0] <= ineqs.shape[1] - 1 else zip(*simplex_to_cones(v[simplex]))
 
-        for l_c, R_c, s in zip(lows, Rs, signs):
+        for ineqs_c, s in cones:
 
+            l_c, R_c = cones_to_rectangle(ineqs_c, cov_w)
             cov_c = R_c.dot(cov_w.dot(R_c.T))
             f, G = get_F_G(l_c, cov_c)
     
@@ -490,6 +442,7 @@ def phis_w(ineq, mu, cov_w):
 
 
 def phis_all(ineqs, mu_all, cov_all):
+
     phi0 = np.zeros(len(ineqs))
     phi1 = np.zeros((len(ineqs), cov_all.shape[-1]))
     phi2 = np.zeros(phi1.shape + (cov_all.shape[-1],))
@@ -540,7 +493,9 @@ def marginal_moments(x, regions, cov_x, cov_z):
     # find all mus and cov (cov is constant per x, not mus)
     mus, covs = mu_sigma(x, As, Bs, cov_z, cov_x) #(N n D) (n D D)
     log_kappas = log_kappa(x, cov_x, cov_z, As, Bs) #(N n)
-    ineqs = [regions[r]['ineq'] for r in regions]
+    
+    ineqs = np.array([regions[r]['ineq'] for r in regions])
+    
     P0, P1, P2 = [], [], []
     for mu in tqdm(mus, desc='Computing PHIS'):
         p0, p1, p2 = phis_all(ineqs, mu, covs)
@@ -549,9 +504,9 @@ def marginal_moments(x, regions, cov_x, cov_z):
         P2.append(p2)
     phis = [np.array(P0), np.array(P1), np.array(P2)]
 
-    print(phis[0])
-    phis[0] = np.maximum(phis[0], 1e-18)
-#    phis[2] = np.maximum(phis[2], np.eye(len(cov_z)) * 1e-4)
+    phis[0] = np.maximum(phis[0], 1e-30)
+    phis[2] = np.maximum(phis[2], 1e-30 * np.eye(len(cov_z)))
+
     # compute marginal
     px = np.exp(lse(log_kappas + np.log(phis[0]), axis=1)) # (N)
 

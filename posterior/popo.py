@@ -14,6 +14,25 @@ from multiprocessing import Pool
 import matplotlib
 from matplotlib.patches import Patch
 import matplotlib.font_manager
+from sklearn.neighbors import KernelDensity
+
+
+def kde2D(x, y, bandwidth, X0, X1, Y0, Y1, **kwargs): 
+    """Build 2D kernel density estimate (KDE)."""
+
+    # create grid of sample locations (default: 100x100)
+    xx, yy = np.mgrid[X0:X1:100j,Y0:Y1:100j]
+
+    xy_sample = np.vstack([yy.ravel(), xx.ravel()]).T
+    xy_train  = np.vstack([y, x]).T
+
+    kde_skl = KernelDensity(bandwidth=bandwidth, **kwargs)
+    kde_skl.fit(xy_train)
+
+    # score_samples() returns the log-likelihood of the samples
+    z = np.exp(kde_skl.score_samples(xy_sample))
+    return xx, yy, np.reshape(z, xx.shape)
+
 
 Ds = [1, 4, 16, 2]
 mu_z = np.zeros(Ds[0])
@@ -50,7 +69,7 @@ for seed in [37, 146, 53, 187, 79]:
         As = np.array([regions[s]['Ab'][0] for s in regions])
         Bs = np.array([regions[s]['Ab'][1] for s in regions])
         
-        predictions = model['sample'](200)
+        predictions = model['sample'](20000)
         X0, X1 = predictions[:, 0].min(), predictions[:, 0].max()
         Y0, Y1 = predictions[:, 1].min(), predictions[:, 1].max()
         X0 -= 0.3
@@ -61,15 +80,18 @@ for seed in [37, 146, 53, 187, 79]:
         noise = np.random.randn(*predictions.shape) * ss
 
         # PLOT POSTERIOR
-        vx = np.eye(2) * model['varx']()
-        p2, m20, m21, m22 = utils.posterior(xx, regions, outpute, As, Bs,
-                                            np.eye(1), vx, model['input2signs'])
-        exp = np.einsum('ns,nds->d', m21, As) + np.einsum('n,nd->d', m20, Bs)
+        cov_x = np.eye(2) * model['varx']()
+        p2 = utils.posterior(xx, regions, outpute[None, :], As, Bs,
+                                            np.eye(1), cov_x, model['input2signs'])
+        m20, m21, m22 = utils.marginal_moments(outpute[None, :], regions, cov_x, np.eye(1))[1:]
+ 
+        exp = np.einsum('Nns,nds->d', m21, As) + np.einsum('Nn,nd->d', m20, Bs)
         mu = m21.sum()
 
         muhat = np.average(xx[:,0], weights=p2)
-        print(muhat, mu)
-        print(np.average((xx[:,0])**2, weights=p2), m22.sum())
+        print(np.average(np.ones(len(p2)), weights=p2), m20.sum())
+        print(np.average(xx[:,0], weights=p2), mu)
+        print(np.average(xx[:,0] ** 2, weights=p2), m22.sum())
 
         if Ds[0] == 1:
             plt.plot(xx, p2, label=r'$p(\boldsymbol{z}|\boldsymbol{x})$')
@@ -106,21 +128,16 @@ for seed in [37, 146, 53, 187, 79]:
         
         xxx = np.meshgrid(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N))
         xxx = np.hstack([xxx[0].flatten()[:, None], xxx[1].flatten()[:, None]])
-        
-        p = list()
-        cov_x = np.eye(2) * model['varx']()
-        for xxxx in tqdm(xxx):
-            p.append(utils.marginal_moments(xxxx, regions, cov_x, np.eye(1))[0])
-        p = np.array(p).reshape((N, N))
-    
+        px, m20, m21, m22 = utils.marginal_moments(xxx, regions, cov_x, np.eye(1))
+        p = px.reshape((N, N))
         fig = plt.figure()
-        plt.imshow(np.exp(p), extent=[X0, X1, Y0, Y1])
-        plt.contour(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N), 1.9**p, 4,
+        plt.imshow(p, extent=[X0, X1, Y0, Y1])
+        plt.contour(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N), 0.7**p, 4,
                     linewidths = 0.45, colors = 'w')
         cmap = matplotlib.cm.get_cmap('plasma')
         elements = [Patch(facecolor=cmap(0), edgecolor='k', label='0'),
                     Patch(facecolor=cmap(1.), edgecolor='k',
-                          label=str(np.round(np.exp(p).max(),2)))]
+                          label=str(np.round(p.max(),2)))]
         ax = plt.gca()
         ax.legend(handles=elements)
     
@@ -129,4 +146,12 @@ for seed in [37, 146, 53, 187, 79]:
         plt.ylim([Y0, Y1])
         plt.savefig('images/proba_{}_{}.png'.format(seed, i + int(ss > 0.05)))
  
-
+        xxxx, yyyy, zzzz = kde2D(predictions[:,0] + noise[:, 0],
+                            predictions[:,1] + noise[:, 1], 0.05, X0=X0, X1=X1,
+                            Y0=Y0, Y1=Y1)
+        print(zzzz.shape)
+        plt.imshow(zzzz.T, extent=[X0, X1, Y0, Y1])
+        plt.xlim([X0, X1])
+        plt.ylim([Y0, Y1])
+        plt.savefig('images/trueproba_{}_{}.png'.format(seed, i + int(ss > 0.05)))
+ 
