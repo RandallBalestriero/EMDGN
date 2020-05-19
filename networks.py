@@ -7,13 +7,13 @@ import symjax.tensor as T
 import utils
 from tqdm import tqdm
 
-cov_b = 100000
-cov_W = 100000
+cov_b = 1e7
+cov_W = 1e3
 
 def init_weights(Ds, seed, scaler=1):
     np.random.seed(seed)
-    Ws = [sj.initializers.he((i, j)) * scaler for i, j in zip(Ds[1:], Ds[:-1])]
-    bs = [sj.initializers.normal((j,))/10 * scaler for j in Ds[1:]]
+    Ws = [sj.initializers.glorot((i, j)) * scaler for i, j in zip(Ds[1:], Ds[:-1])]
+    bs = [sj.initializers.he((j,)) * scaler for j in Ds[1:]]
     return Ws, bs
 
 
@@ -112,7 +112,7 @@ def create_glo(batch_size, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
         variables = Ws + bs
     else:
         loss = Ds[-1] * logvar_x.sum() + T.sum((x - h[-1])**2 / T.exp(logvar_x)) / batch_size + (z**2).sum() / batch_size + prior
-        variables = Ws + bs + [logvar_x]
+        variables = Ws + bs
 
     prior = sum([(b**2).sum() for b in bs], 0.) / cov_b\
             + sum([(w**2).sum() for w in Ws], 0.) / cov_W
@@ -274,25 +274,26 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
     B2m0 = T.einsum('nd,Nn->Nd', bQs[-1] ** 2, m0)
     Am1 = T.einsum('nds,Nns->Nd', AQs[-1], m1)
     ABm1 = T.einsum('nds,nd,Nns->Nd', AQs[-1], bQs[-1], m1)
-    Am2AT = T.diagonal(T.einsum('nds,Nnsc,npc->Ndp', AQs[-1], m2, AQs[-1]),
+    Am2ATdiag = T.diagonal(T.einsum('nds,Nnsc,npc->Ndp', AQs[-1], m2, AQs[-1]),
                         axis1=1, axis2=2)
     xAm1Bm0 = X * (Am1 + Bm0)
 
     M2diag = T.diagonal(m2.sum(1), axis1=1, axis2=2)
     
-    prior = sum([T.sum(w**2) for w in Ws], 0.) / cov_W + sum([T.sum(v**2) for v in vs[:-1]], 0.) / cov_b
+    prior = sum([T.sum(w**2) for w in Ws], 0.) / cov_W\
+            + sum([T.sum(v**2) for v in vs[:-1]], 0.) / cov_b
     loss = - 0.5 * (T.log(var_x).sum() + T.log(var_z).sum()\
-            + (M2diag / var_z).sum(1)\
-            + ((X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1) / var_x).sum(1))
+            + (M2diag / var_z).sum(1).mean() + ((X ** 2 - 2 * xAm1Bm0 + B2m0\
+            + Am2ATdiag + 2 * ABm1) / var_x).sum(1).mean())
 
-    mean_loss = - (loss + 0.5 * prior).mean()
+    mean_loss = - (loss + 0.5 * prior)
     adam = sj.optimizers.SGD(mean_loss, 0.001, params=Ws + vs)
 
     ############################################################################
     # update of var_x
     ############################################################################
 
-    update_varx = (X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2AT + 2 * ABm1).mean()\
+    update_varx = (X ** 2 - 2 * xAm1Bm0 + B2m0 + Am2ATdiag + 2 * ABm1).mean()\
                     * T.ones(Ds[-1])
     update_varz = M2diag.mean() * T.ones(Ds[0])
 
@@ -311,9 +312,8 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
             residual = (X[:, None, :] - separated_bs) * m0[:, :, None]\
                                          - T.einsum('nds,Nns->Nnd', AQs[-1], m1)
             back_error = T.einsum('nds,nd->s', FQ[i], residual.mean(0))
-            probed = FQ[i]
-            whiten = T.einsum('ndc,nds,n->cs', FQ[i] , FQ[i], m0.mean(0))
-            whiten = whiten + T.eye(whiten.shape[-1]) / cov_b
+            whiten = T.einsum('ndc,nds,n->cs', FQ[i] , FQ[i], m0.mean(0))\
+                        + T.eye(back_error.shape[0]) / cov_b
             update_vs[vs[i]] = T.linalg.solve(whiten, back_error)
         else:
             back_error = (X - (Am1 + Bm0) + vs[-1])
@@ -358,7 +358,8 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
 
         vector = T.einsum('Nnc,Nns->cs', bottom_up, top_down) / batch_size
         condition = T.diagonal(whiten)
-        update_Ws[Ws[i]] = T.linalg.solve(whiten, vector.reshape(-1)).reshape(Ws[i].shape)
+        update_W = T.linalg.solve(whiten, vector.reshape(-1)).reshape(Ws[i].shape)
+        update_Ws[Ws[i]] = update_W#T.clip(update_W, -4, 4)
 
     ############################################################################
     # create the io functions
@@ -395,7 +396,7 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
               'varx': sj.function(outputs=var_x),
               'varz': sj.function(outputs=var_z),
               'params': params,
-              'probed' : sj.function(SIGNS, X, m0, m1, m2, outputs=probed),
+#              'probed' : sj.function(SIGNS, X, m0, m1, m2, outputs=probed),
               'input2signs': sj.function(x, outputs=xsigns),
               'S' : Ds[0], 'D':  Ds[-1], 'R': R, 'model': 'EM', 'L':len(Ds)-1,
               'kwargs': {'batch_size': batch_size, 'Ds':Ds, 'seed':seed,
@@ -467,7 +468,7 @@ def EM(model, DATA, epochs, n_iter, update_var=False, pretrain=False):
             error = glo['loss'](bat)
             if cpt % 200 == 0:
                 print(cpt, error)
-            if cpt > 40000:
+            if cpt > 2000:
                 break
      
         # THEN SET IT UP
@@ -485,14 +486,15 @@ def EM(model, DATA, epochs, n_iter, update_var=False, pretrain=False):
     for e in range(epochs):
         output, A, b, inequalities, signs = model['input2all'](z)
         regions = utils.search_region(model['signs2ineq'], model['signs2Ab'],
-                                      signs)
+                                      signs, model['input2signs'])
 #        others = utils.search_region_sample(model['input2signs'])
 #        print('regions', len(regions), len(others))
 #        print('Equal ?', regions.keys() == others)
 #        print(regions.keys())
 #        print(utils.search_region_sample(model['input2signs']))
         for r in regions:
-            print(utils.get_vertices(regions[r]['ineq'][:, :-1], regions[r]['ineq'][:,-1]))
+            print('VERTICES',utils.get_vertices(regions[r]['ineq'][:, :-1], regions[r]['ineq'][:,-1]))
+        print(model['params']())
         if len(regions) > R:
             print('ALARMMM')
             print(model['params']())

@@ -44,7 +44,7 @@ in_signs = T.Placeholder((np.sum(Ds[1:-1]),), 'bool')
 R, BS = 40, 50
 
 if Ds[0] == 1:
-    xx = np.linspace(-5, 5, 500).reshape((-1, 1))
+    xx = np.linspace(-5, 5, 1500).reshape((-1, 1))
 else:
     xx = np.meshgrid(np.linspace(-5, 5, 100), np.linspace(-3, 3, 100))
     xx = np.vstack([xx[0].flatten(), xx[1].flatten()]).T
@@ -95,9 +95,15 @@ for seed in [37, 146, 53, 187, 79]:
 
         if Ds[0] == 1:
             plt.plot(xx, p2, label=r'$p(\boldsymbol{z}|\boldsymbol{x})$')
-            plt.plot([mu, mu], [-0.2, 0.2], color='g', label='mean')
+            plt.axvline(mu, color='g', linestyle='--', label='mean')
         else:
             plt.imshow((np.array(p)).reshape((N, N)), extent=[-L, L, -L, L])
+        for r in regions:
+            vertices = utils.get_vertices(regions[r]['ineq'][:, :-1],
+                                          regions[r]['ineq'][:, -1])
+            plt.plot([vertices[0], vertices[0]], [-0.1, 0.1], color='k', linewidth=0.8)
+            plt.plot([vertices[1], vertices[1]], [-0.1, 0.1], color='k', linewidth=0.8)
+        plt.xlim([-4, 4])
         ax = plt.gca()
         ax.legend()
         plt.savefig('images/prior_{}_{}.png'.format(seed, i+ int(ss > 0.05)))

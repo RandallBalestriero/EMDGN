@@ -158,26 +158,37 @@ def flip(A, i):
         sign = sign[:, None]
     return A * sign
 
-def reduce_ineq(ineqs):
-    M = cdd.Matrix(ineqs)
+def reduce_ineq(A, b):
+    if A.shape[1] == 1:
+        A_ = A[:, 0]
+        array = - b / A_
+        pos = np.where(A_ > 0)[0]
+        neg = np.where(A_ < 0)[0]
+        lower = pos[np.argmax(array[pos])]
+        upper = neg[np.argmin(array[neg])]
+#        if len(pos) > 0:
+#            lower = pos[np.argmax(array[pos])]
+#        else:
+#            lower = None
+#        if len(neg) > 0:
+#            upper = neg[np.argmin(array[neg])]
+#        else:
+#            upper = None
+#
+#        if lower is None:
+#            return [upper]
+#        if upper is None:
+#            return [lower]
+        return [lower, upper]
+    M = cdd.Matrix(np.hstack([b[:, None], A]))
     M.rep_type = cdd.RepType.INEQUALITY
-    I = list(set(range(len(ineqs))) - set(M.canonicalize()[1]))
-    return I
+    feasibles = set(list(np.nonzero(np.linalg.norm(A,axis=1) > 1e-6)[0]))
+    I = feasibles - set(M.canonicalize()[1])
+    return list(I)
 
-def find_neighbours(signs2ineq, signs):
-
-    ineq = bound_ineq(signs2ineq(np.array(signs)))
-
-    I = reduce_ineq(ineq)
-
-    # create the sign switching table
-    F = np.ones((len(I), len(signs)))
-    F[np.arange(len(I)), I] = - 1
-
-    return F * signs
 
 def search_region_sample(input2signs):
-    z = np.random.randn(100000, 1) * 5
+    z = np.random.randn(10000, 1) * 2
     signs = []
     for i in range(len(z)):
         signs.append(input2signs(z[i]))
@@ -186,41 +197,47 @@ def search_region_sample(input2signs):
 
 
 
-def search_region(signs2ineq, signs2Ab, signs):
+def search_region(signs2ineq, signs2Ab, signs, input2signs=None):
     all_signs = set()
     # init the to_visit
     to_visit=set([tuple(signs)])
     # search all the regions (their signs)
+    print('searching regions')
     while True:
         if len(to_visit) == 0:
             break
         all_signs = all_signs.union(to_visit)
-        to_visit_after = set()
+        print('current all_signs', all_signs)
+        neighbours = set()
         for s in to_visit:
             
             # find neighbour
-            ineqs = signs2ineq(np.array(s))
-            I = reduce_ineq(np.hstack([ineqs[:,-1:], ineqs[:,:-1]]))
-
-            # create the sign switching table
+            ineqs = bound_ineq(signs2ineq(np.array(s)))
+            I = reduce_ineq(ineqs[:,:-1], ineqs[:,-1])
+            I = [i for i in I if i<len(s)]
+            print('current regions', s, ':',get_vertices(ineqs[:,:-1], ineqs[:,-1]))
+            print('to visit', I)
+            if len(I) == 0:
+                continue
             F = np.ones((len(I), len(s)))
             F[np.arange(len(I)), I] = - 1
-            to_visit_after = to_visit_after.union(set([tuple(r) for r in F * s]))
-        to_visit = to_visit_after - all_signs
+            neighbours = neighbours.union(set([tuple(r) for r in F * s]))
+        to_visit = neighbours - all_signs
 
     # now set up S
     S = dict()
+#    all_signs = search_region_sample(input2signs)
     for s in all_signs:
         ineq = bound_ineq(signs2ineq(s))
-        if get_vertices(ineq[:, :-1], ineq[:,-1]) is not None:
-            S[s] = {'ineq': ineq, 'Ab': signs2Ab(s)}
+#        if get_vertices(ineq[:, :-1], ineq[:,-1]) is not None:
+        S[s] = {'ineq': ineq, 'Ab': signs2Ab(s)}
     return S
 
 
 
 def bound_ineq(ineq):
     if ineq.shape[1] == 2 :
-        return np.vstack([ineq, np.array([[1, 5],[-1, 5]])])
+        return np.vstack([ineq, np.array([[1, 18],[-1, 18]])])
     else:
         return np.vstack([ineq, np.array([[1, 0, -20],[0, 1, -20],
                                          [-1, 0, -20],[0, -1, -20]])])
@@ -235,12 +252,15 @@ def get_vertices(A,b):
         A_ = A[:, 0]
         lower = np.max(-b[A_ > 0] / A_[A_ > 0])
         upper = np.min(-b[A_ < 0] / A_[ A_ < 0])
-        if lower > upper:
+        if lower >= upper:
             return None
         return np.array([lower, upper])
     m = cdd.Matrix(np.hstack([b.reshape((-1,1)),  A]))
     m.rep_type = cdd.RepType.INEQUALITY
-    return np.sort(np.array(cdd.Polyhedron(m).get_generators())[:, 1])
+    try:
+        return np.sort(np.array(cdd.Polyhedron(m).get_generators())[:, 1])
+    except:
+        return None
 
 
 def mvstdnormcdf(lower, cov):
@@ -438,16 +458,17 @@ def phis_w(ineq, mu, cov_w):
         inter = scipy.spatial.HalfspaceIntersection(system, res.x[:-1])
         vertices = inter.dual_vertices
         simplices = Delaunay(vertices).simplices
-    else:
+    else:#VERTICES SHOULD BE ORDERED
         vertices = get_vertices(A, B_mu)
-        phi0 = mvstdnormcdf(vertices[[0]], cov_w)\
-                - mvstdnormcdf(vertices[[1]], cov_w)
-        f1 = get_F_G(vertices[[0]], cov_w)[0]
-        f2 = get_F_G(vertices[[1]], cov_w)[0]
+        phi0 = scipy.stats.norm.sf(vertices[0], scale=np.sqrt(cov_w))\
+                - scipy.stats.norm.sf(vertices[1], scale=np.sqrt(cov_w))
+        f1 = scipy.stats.norm.pdf(vertices[0], scale=np.sqrt(cov_w))
+        f2 = scipy.stats.norm.pdf(vertices[1], scale=np.sqrt(cov_w))#get_F_G(vertices[[1]], cov_w)[0]
 
         phi1 = cov_w * (f1 - f2)
-        phi2 = np.diag((vertices[[0]] * f1 - vertices[[1]] * f2) / cov_w)
-        phi2 = cov_w * phi0 + phi0 * mu ** 2 + phi2 * cov_w**2 + 2 * mu * phi1
+        phi2 = cov_w * (phi0 + vertices[[0]] * f1 - vertices[[1]] * f2)
+        ###
+        phi2 = phi0 * mu ** 2 + 2 * mu * phi1 + phi2# * cov_w#**2
         phi1 += mu * phi0
 
         return phi0, phi1, phi2
@@ -549,19 +570,23 @@ def marginal_moments(x, regions, cov_x, cov_z):
         P2.append(p2)
     phis = [np.array(P0), np.array(P1), np.array(P2)]
 
-    print(phis[0])
-    phis[0] = np.maximum(phis[0], 1e-18)
-#    phis[2] = np.maximum(phis[2], np.eye(len(cov_z)) * 1e-4)
     # compute marginal
-    px = np.exp(lse(log_kappas + np.log(phis[0]), axis=1)) # (N)
+    px = np.exp(lse(log_kappas + np.log(np.maximum(phis[0], 1e-18)), axis=1)) # (N)
 
     # compute per region moments
-    print(mus.shape, log_kappas.shape)
     alphas = np.exp(log_kappas - log_kappas.max(1, keepdims=True))\
             / (np.exp(log_kappas - log_kappas.max(1, keepdims=True)) * phis[0]).sum(1, keepdims=True)
+#    alphas = softmax(log_kappas + np.log(np.maximum(phis[0], 1e-48)), 1) / (np.maximum(phis[0], 1e-48))
 
-    m0_w = phis[0] * alphas
-    m1_w = phis[1] * alphas[:, :, None]
-    m2_w = phis[2] * alphas[:, :, None, None]
+    m0_w = softmax(log_kappas + np.log(np.maximum(phis[0], 1e-148)), 1)
+    if 0:#len(cov_z) == 1:
+        m2_w = m0_w[:, :, None, None] * mus[:, :, :, None] ** 2\
+            + ((2 * mus * phis[1])[:, :, :, None]\
+            + phis[2]) * alphas[:, :, None, None]
+        m1_w = phis[1] * alphas[:, :, None] + mus * m0_w[:, :, None]
+    else:
+        m0_w = phis[0] * alphas
+        m1_w = phis[1] * alphas[:, :, None]
+        m2_w = phis[2] * alphas[:, :, None, None]
 
     return px, m0_w, m1_w, m2_w

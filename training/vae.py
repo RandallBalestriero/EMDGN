@@ -10,18 +10,29 @@ import utils
 import networks
 from tqdm import tqdm
 import matplotlib
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--std', type=float)
+parser.add_argument('--pretrain', type=int)
+parser.add_argument('--seed', type=int)
+args = parser.parse_args()
 
 
 
-np.random.seed(int(sys.argv[-2]) + 10)
 
-Ds = [1, 5, 5, 2]
-R, BS = 30, 300
 
-if sys.argv[-1] == 'VAE':
-    model = networks.create_vae(BS, Ds, 1, lr=0.005, leakiness=0.1)
-else:
-    model = networks.create_fns(BS, R, Ds, 1, lr=0.001, leakiness=0.5, var_x=0.4**2)
+
+
+np.random.seed(args.seed)
+
+Ds = [1, 12, 2]
+R, BS = 64, 500
+
+#if sys.argv[-1] == 'VAE':
+#    model = networks.create_vae(BS, Ds, 1, lr=0.005, leakiness=0.1)
+#else:
+model = networks.create_fns(BS, R, Ds, 1, lr=0.001, leakiness=0.1, var_x=args.std**2)
 
 X = model['sample'](BS)
 noise = np.random.randn(*X.shape) * np.sqrt(model['varx']())
@@ -33,7 +44,7 @@ plt.close()
 DATA = np.random.randn(BS, Ds[-1])
 DATA /= np.linalg.norm(DATA, 2, 1, keepdims=True)
 
-DATA = np.linspace(-3, 3, BS)
+DATA = np.random.randn(BS) * 2
 DATA = np.vstack([DATA, np.cos(DATA*1.4)]).T
 
 #DATA = np.random.randn(BS) * 3
@@ -47,9 +58,10 @@ DATA /= 1
 #DATA *= 3
 #DATA += 2
 L = []
-for iter in tqdm(range(250)):
+for iter in tqdm(range(550)):
 
-    L.append(networks.EM(model, DATA, 1, min((iter+1)*10, 400), pretrain=0, update_var=iter > 4)[-1:])
+    L.append(networks.EM(model, DATA, 1, min((iter+1)*20, 1400), pretrain=iter==args.pretrain, update_var=iter > 1))
+#    L.append(networks.EM(model, DATA, 1, 1400, pretrain=iter==args.pretrain, update_var=iter>2))
 #    print(L[-1])
 #    print(L[-1][0], L[-1][-1])
 #
@@ -63,5 +75,5 @@ for iter in tqdm(range(250)):
     plt.subplot(122)
     plt.plot(np.concatenate(L))
     plt.tight_layout()
-    plt.savefig('after_{}_{}.png'.format(iter, sys.argv[-1]))
+    plt.savefig('after_{}.png'.format(iter))
     plt.close()
