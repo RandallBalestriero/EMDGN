@@ -202,12 +202,12 @@ def search_region(signs2ineq, signs2Ab, signs, input2signs=None):
     # init the to_visit
     to_visit=set([tuple(signs)])
     # search all the regions (their signs)
-    print('searching regions')
+    #print('searching regions')
     while True:
         if len(to_visit) == 0:
             break
         all_signs = all_signs.union(to_visit)
-        print('current all_signs', all_signs)
+        #print('current all_signs', all_signs)
         neighbours = set()
         for s in to_visit:
             
@@ -215,8 +215,8 @@ def search_region(signs2ineq, signs2Ab, signs, input2signs=None):
             ineqs = bound_ineq(signs2ineq(np.array(s)))
             I = reduce_ineq(ineqs[:,:-1], ineqs[:,-1])
             I = [i for i in I if i<len(s)]
-            print('current regions', s, ':',get_vertices(ineqs[:,:-1], ineqs[:,-1]))
-            print('to visit', I)
+            #print('current regions', s, ':',get_vertices(ineqs[:,:-1], ineqs[:,-1]))
+            #print('to visit', I)
             if len(I) == 0:
                 continue
             F = np.ones((len(I), len(s)))
@@ -229,7 +229,9 @@ def search_region(signs2ineq, signs2Ab, signs, input2signs=None):
 #    all_signs = search_region_sample(input2signs)
     for s in all_signs:
         ineq = bound_ineq(signs2ineq(s))
-#        if get_vertices(ineq[:, :-1], ineq[:,-1]) is not None:
+        v = get_vertices(ineq[:, :-1], ineq[:,-1])
+        if v[0] > v[1] - 0.0001:
+            continue
         S[s] = {'ineq': ineq, 'Ab': signs2Ab(s)}
     return S
 
@@ -239,8 +241,8 @@ def bound_ineq(ineq):
     if ineq.shape[1] == 2 :
         return np.vstack([ineq, np.array([[1, 18],[-1, 18]])])
     else:
-        return np.vstack([ineq, np.array([[1, 0, -20],[0, 1, -20],
-                                         [-1, 0, -20],[0, -1, -20]])])
+        return np.vstack([ineq, np.array([[1, 0, 20],[0, 1, 20],
+                                         [-1, 0, 20],[0, -1, 20]])])
  
 
 
@@ -525,6 +527,7 @@ def phis_all(ineqs, mu_all, cov_all):
 
 def log_kappa(x, cov_x, cov_z, A, b):
     cov = cov_x + np.einsum('nds,sp,nkp->ndk',A, cov_z, A)
+    print(cov_x,np.einsum('nds,sp,nkp->ndk',A, cov_z, A)[-1])
     kappas = np.array([multivariate_normal.logpdf(x, mean=m, cov=c)
                        for m, c in zip(b, cov)])
     if x.shape[0] == 1:
@@ -563,22 +566,24 @@ def marginal_moments(x, regions, cov_x, cov_z):
     log_kappas = log_kappa(x, cov_x, cov_z, As, Bs) #(N n)
     ineqs = [regions[r]['ineq'] for r in regions]
     P0, P1, P2 = [], [], []
-    for mu in tqdm(mus, desc='Computing PHIS'):
+    for mu in mus:
         p0, p1, p2 = phis_all(ineqs, mu, covs)
         P0.append(p0)
         P1.append(p1)
         P2.append(p2)
+
     phis = [np.array(P0), np.array(P1), np.array(P2)]
+    phis[0] += 1e-42#14#= np.maximum(phis[0], 1e-15)
 
     # compute marginal
-    px = np.exp(lse(log_kappas + np.log(np.maximum(phis[0], 1e-18)), axis=1)) # (N)
+    px = lse(log_kappas + np.log(phis[0]), axis=1) # (N)
 
     # compute per region moments
     alphas = np.exp(log_kappas - log_kappas.max(1, keepdims=True))\
             / (np.exp(log_kappas - log_kappas.max(1, keepdims=True)) * phis[0]).sum(1, keepdims=True)
 #    alphas = softmax(log_kappas + np.log(np.maximum(phis[0], 1e-48)), 1) / (np.maximum(phis[0], 1e-48))
 
-    m0_w = softmax(log_kappas + np.log(np.maximum(phis[0], 1e-148)), 1)
+    m0_w = softmax(log_kappas + np.log(phis[0]), 1)
     if 0:#len(cov_z) == 1:
         m2_w = m0_w[:, :, None, None] * mus[:, :, :, None] ** 2\
             + ((2 * mus * phis[1])[:, :, :, None]\

@@ -1,16 +1,16 @@
 #!/bin/bash
 GPU=0
-for width in 6 12
+for model in VAE EM
 do
-	for depth in 1
+	for dataset in wave circle
 	do
-		for leakiness in 0.01 0.2 -1.0
+		for network in small large
 		do
-			for scale in 1 2
-			do
-				GPU=$((($GPU+1)%7))
-	       			screen -dmS compare$width$depth$leakiness$scale bash -c "export CUDA_VISIBLE_DEVICES='';python -i compare.py --dataset circle --width $width --depth $depth --leakiness $leakiness --scale $scale"
-			done
+			echo $model
+			echo $dataset
+			echo $network
+			GPU=$(((GPU+1)%3))
+			screen -dmS compare$dataset$model bash -c "export CUDA_VISIBLE_DEVICES=$GPU;python -i multi_runs.py --dataset $dataset --model $model --epochs 100 --network $network --noise 0.02"
 		done
 	done
 done

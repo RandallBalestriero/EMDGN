@@ -7,13 +7,44 @@ import symjax.tensor as T
 import utils
 from tqdm import tqdm
 
-cov_b = 1e7
-cov_W = 1e3
+cov_b = 1e2#1e14 (BON)
+cov_W = 1e2# (BON)
+
+
+
+def create_dataset(name, N, noise_std=0.1):
+ 
+    if name == 'circle':
+        DATA = np.random.randn(N, 2)
+        DATA /= np.linalg.norm(DATA, 2, 1, keepdims=True)
+    
+    elif name == 'wave':
+        DATA = np.random.randn(N)
+        DATA = np.vstack([DATA, np.cos(DATA*1.4)]).T
+    
+    elif name == 'mixture':
+        centers = np.linspace(-1, 1, 10)
+        centers = np.vstack([centers, centers]).T
+        DATA = centers.repeat(N // 10, 0)
+
+    elif name == 'mnist':
+        DATA = sj.datasets.mnist.load()
+        DATA = DATA[0][DATA[1] == 4]
+        DATA = DATA[:N]
+        DATA = np.reshape(DATA, (len(DATA), -1))
+        DATA /= np.linalg.norm(DATA, 2, 1, keepdims=True)
+        print(DATA.max())
+    DATA += np.random.randn(*DATA.shape) * noise_std
+    return DATA
+
+
+
+
 
 def init_weights(Ds, seed, scaler=1):
     np.random.seed(seed)
     Ws = [sj.initializers.glorot((i, j)) * scaler for i, j in zip(Ds[1:], Ds[:-1])]
-    bs = [sj.initializers.he((j,)) * scaler for j in Ds[1:]]
+    bs = [sj.initializers.normal((j,)) * scaler for j in Ds[1:]]
     return Ws, bs
 
 
@@ -169,9 +200,11 @@ def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1):
     h.append(T.matmul(h[-1], Ws[-1].transpose()) + bs[-1])
     h_ph.append(T.matmul(h_ph[-1], Ws[-1].transpose()) + bs[-1])
 
+    prior = sum([T.mean(w**2) for w in Ws], 0.) / cov_W\
+            + sum([T.mean(v**2) for v in bs[:-1]], 0.) / cov_b 
     kl = 0.5 * (1 + logvar - var - mu ** 2).sum(1)
     px = - 0.5 * (logvar_x + ((x - h[-1])**2 / var_x)).sum(1)
-    loss = - (px + kl).mean()
+    loss = - (px + kl).mean() + prior
 
     variables = Ws + bs + sj.layers.get_variables(enc) + [logvar_x]
     opti = sj.optimizers.Adam(loss, lr, params=variables)
@@ -186,7 +219,8 @@ def create_vae(batch_size, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1):
     output['model'] = 'VAE'
     output['varx'] = get_varx
     output['kwargs'] = {'batch_size': batch_size, 'Ds':Ds, 'seed':seed,
-                    'leakiness':leakiness, 'lr':lr, 'scaler':scaler}
+                    'leakiness':leakiness, 'lr':lr, 'scaler':scaler,
+                    'prior': sj.function(outputs=prior)}
     def sample(n):
         samples = []
         for i in range(n // batch_size):
@@ -280,8 +314,8 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
 
     M2diag = T.diagonal(m2.sum(1), axis1=1, axis2=2)
     
-    prior = sum([T.sum(w**2) for w in Ws], 0.) / cov_W\
-            + sum([T.sum(v**2) for v in vs[:-1]], 0.) / cov_b
+    prior = sum([T.mean(w**2) for w in Ws], 0.) / cov_W\
+            + sum([T.mean(v**2) for v in vs[:-1]], 0.) / cov_b
     loss = - 0.5 * (T.log(var_x).sum() + T.log(var_z).sum()\
             + (M2diag / var_z).sum(1).mean() + ((X ** 2 - 2 * xAm1Bm0 + B2m0\
             + Am2ATdiag + 2 * ABm1) / var_x).sum(1).mean())
@@ -313,7 +347,7 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
                                          - T.einsum('nds,Nns->Nnd', AQs[-1], m1)
             back_error = T.einsum('nds,nd->s', FQ[i], residual.mean(0))
             whiten = T.einsum('ndc,nds,n->cs', FQ[i] , FQ[i], m0.mean(0))\
-                        + T.eye(back_error.shape[0]) / cov_b
+                        + T.eye(back_error.shape[0]) / (Ds[i] * cov_b)
             update_vs[vs[i]] = T.linalg.solve(whiten, back_error)
         else:
             back_error = (X - (Am1 + Bm0) + vs[-1])
@@ -337,7 +371,7 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
             V = Q * (V1 + V2 + V3 + V3.transpose((0, 2, 1))) / batch_size
 
         whiten = T.stack([T.kron(U[n], V[n]) for n in range(V.shape[0])]).sum(0)
-        whiten = whiten + T.eye(whiten.shape[-1]) / cov_W
+        whiten = whiten + T.eye(whiten.shape[-1]) / (Ds[i]*Ds[i+1]*cov_W)
         # compute the residual (bottom up)
         if i == len(Ws) - 1:
             bottom_up = (X[:, None, :] - vs[-1])
@@ -359,7 +393,7 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
         vector = T.einsum('Nnc,Nns->cs', bottom_up, top_down) / batch_size
         condition = T.diagonal(whiten)
         update_W = T.linalg.solve(whiten, vector.reshape(-1)).reshape(Ws[i].shape)
-        update_Ws[Ws[i]] = update_W#T.clip(update_W, -4, 4)
+        update_Ws[Ws[i]] = update_W
 
     ############################################################################
     # create the io functions
@@ -394,6 +428,7 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
                                     updates=dict(zip(Ws + vs + [var_x],
                                              Ws_ph + vs_ph + [var_x_ph]))),
               'varx': sj.function(outputs=var_x),
+              'prior': sj.function(outputs=prior),
               'varz': sj.function(outputs=var_z),
               'params': params,
 #              'probed' : sj.function(SIGNS, X, m0, m1, m2, outputs=probed),
@@ -415,30 +450,19 @@ def create_fns(batch_size, R, Ds, seed, leakiness=0.1, lr=0.0002, scaler=1,
 
 def NLL(model, DATA):
 
-
     S, D, R = model['S'], model['D'], model['R']
     z = np.random.randn(S)/10
 
-    m0 = np.zeros((DATA.shape[0], R))
-    m1 = np.zeros((DATA.shape[0], R, S))
-    m2 = np.zeros((DATA.shape[0], R, S, S))
-    m_loss = []
     output, A, b, inequalities, signs = model['input2all'](z)
-    regions = utils.search_region(model['signs2ineq'], model['signs2Ab'],
-                                  signs)
-    batch_signs = np.pad(np.array(list(regions.keys())),
-                         [[0, R - len(regions)], [0, 0]])
+    regions = utils.search_region(model['signs2ineq'], model['signs2Ab'], signs)
+    cov_x = np.eye(D) * model['varx']()
+    cov_z = np.eye(S) * model['varz']()
+    log_px = utils.marginal_moments(DATA, regions, cov_x, cov_z)[0]
+
+    return - log_px + model['prior']()
 
 
-    varx = np.eye(D) * model['varx']()
-    varz = np.eye(S) * model['varz']()
-
-    m0[:, :len(regions)], m1[:, :len(regions)], m2[:, :len(regions)] = utils.marginal_moments(DATA, regions, varx, varz)[1:]
-
-    return model['loss'](batch_signs, DATA, m0, m1, m2)
-
-
-def EM(model, DATA, epochs, n_iter, update_var=False, pretrain=False):
+def EM2(model, DATA, epochs, n_iter, update_var=False, pretrain=False):
 
     batch_size = model['kwargs']['batch_size']
     if model['model'] == 'VAE':
@@ -492,9 +516,11 @@ def EM(model, DATA, epochs, n_iter, update_var=False, pretrain=False):
 #        print('Equal ?', regions.keys() == others)
 #        print(regions.keys())
 #        print(utils.search_region_sample(model['input2signs']))
+        V = []
         for r in regions:
-            print('VERTICES',utils.get_vertices(regions[r]['ineq'][:, :-1], regions[r]['ineq'][:,-1]))
-        print(model['params']())
+            V.append(utils.get_vertices(regions[r]['ineq'][:, :-1], regions[r]['ineq'][:,-1]))
+        print('VERTICES',np.sort(np.unique(V)).round(2))
+#        print(model['params']())
         if len(regions) > R:
             print('ALARMMM')
             print(model['params']())
@@ -504,33 +530,95 @@ def EM(model, DATA, epochs, n_iter, update_var=False, pretrain=False):
         varx = np.eye(D) * model['varx']()
         varz = np.eye(S) * model['varz']()
         print('varx', np.diag(varx))
-        print('varz', np.diag(varz))
+#        print('varz', np.diag(varz))
    
         m0 *= 0
         m1 *= 0
         m2 *= 0
         m0[:, :len(regions)], m1[:, :len(regions)], m2[:, :len(regions)] = utils.marginal_moments(DATA, regions, varx, varz)[1:]
 
-        m_loss.append(model['loss'](batch_signs, DATA, m0, m1, m2))
-        print('after E step', m_loss[-1])
+#        m_loss.append(NLL(model, DATA).mean())
+#        print('after E step', m_loss[-1])
 
         for i in range(n_iter):
             if update_var:
-                m_loss.append(model['update_var'](batch_signs, DATA, m0, m1, m2))
+                model['update_var'](batch_signs, DATA, m0, m1, m2)
 #            m_loss.append(model['train'](batch_signs, DATA, m0, m1, m2))
-            if i %10 == 0:
-                params = model['params']()
-                print('here?',np.max(params[0]), np.max(params[1]), np.max(params[2]), np.max(params[3]),
-                        model['loss'](batch_signs, DATA, m0, m1, m2))
-            for l in np.random.permutation(model['L']):#-1, -1, -1):
+#            if np.isnan(m_loss[-1]):
+#                return [None]
+#            if i %10 == 0:
+#                params = model['params']()
+#                print('here?',np.max(params[0]), np.max(params[1]), np.max(params[2]), np.max(params[3]),
+#                        model['loss'](batch_signs, DATA, m0, m1, m2))
+            for l in np.random.permutation(2 * model['L']) % model['L']:#-1, -1, -1):
                 if np.random.randn() < 0:
-                    m_loss.append(model['update_vs'](0.05, l, batch_signs, DATA, m0, m1, m2))
+                    model['update_vs'](0.05, l, batch_signs, DATA, m0, m1, m2)
+#                    m_loss.append(NLL(model, DATA).mean())
                 else:
-                    m_loss.append(model['update_Ws'](0.05, l, batch_signs, DATA, m0, m1, m2))
-        print('after M step', model['loss'](batch_signs, DATA, m0, m1, m2))
-        if n_iter > 1:
-            print('strictly decreasing M step ?:', np.diff(m_loss).max())
+                    model['update_Ws'](0.05, l, batch_signs, DATA, m0, m1, m2)
+#                    m_loss.append(NLL(model, DATA).mean())
+#                    print('after W', m_loss[-1])
+        m_loss.append(NLL(model, DATA).mean())
+        print('after M step', m_loss[-1])
+#        if n_iter > 1:
+#            print('strictly decreasing M step ?:', np.diff(m_loss).max())
     return m_loss
+
+
+
+def EM(model, DATA, epochs, n_iter, update_var=0, extra=None):
+
+    batch_size = model['kwargs']['batch_size']
+    if model['model'] == 'VAE':
+        extra['assign'](*model['params']())
+        L = [NLL(extra, DATA).mean()]
+        LL = []
+        for e in range(epochs):
+            LL.append([])
+            for i in range(len(DATA) // batch_size):
+                LL[-1].append(model['train'](DATA[i * batch_size: (i + 1) * batch_size]))
+            extra['assign'](*model['params']())
+            LL[-1].append(np.mean(LL[-1]))
+            L.append(NLL(extra, DATA).mean())
+        return np.array(L), np.array(LL)
+
+
+    S, D, R = model['S'], model['D'], model['R']
+    z = np.random.randn(S)/10
+
+    m0 = np.zeros((DATA.shape[0], R))
+    m1 = np.zeros((DATA.shape[0], R, S))
+    m2 = np.zeros((DATA.shape[0], R, S, S))
+
+    m_loss = [NLL(model, DATA).mean()]
+    for e in range(epochs):
+        output, A, b, inequalities, signs = model['input2all'](z)
+        regions = utils.search_region(model['signs2ineq'], model['signs2Ab'],
+                                      signs, model['input2signs'])
+        V = []
+        batch_signs = np.pad(np.array(list(regions.keys())),
+                             [[0, R - len(regions)], [0, 0]])
+
+        varx = np.eye(D) * model['varx']()
+        varz = np.eye(S) * model['varz']()
+   
+        m0 *= 0
+        m1 *= 0
+        m2 *= 0
+        m0[:, :len(regions)], m1[:, :len(regions)], m2[:, :len(regions)] = utils.marginal_moments(DATA, regions, varx, varz)[1:]
+
+
+        for i in range(n_iter):
+            if e > update_var:
+                model['update_var'](batch_signs, DATA, m0, m1, m2)
+            for l in np.random.permutation(2 * model['L']) % model['L']:
+                if np.random.randn() < 0:
+                    model['update_vs'](0.05, l, batch_signs, DATA, m0, m1, m2)
+                else:
+                    model['update_Ws'](0.05, l, batch_signs, DATA, m0, m1, m2)
+        m_loss.append(NLL(model, DATA).mean())
+        print('after M step', m_loss[-1])
+    return np.array(m_loss)
 
 
 
