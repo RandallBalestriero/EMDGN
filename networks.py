@@ -8,7 +8,7 @@ import utils
 from tqdm import tqdm
 
 cov_b = 1e2#1e14 (BON)
-cov_W = 1e2# (BON)
+cov_W = 1e2#1e2 (BON)
 
 
 
@@ -21,6 +21,7 @@ def create_dataset(name, N, noise_std=0.1):
     elif name == 'wave':
         DATA = np.random.randn(N)
         DATA = np.vstack([DATA, np.cos(DATA*1.4)]).T
+
     
     elif name == 'mixture':
         centers = np.linspace(-1, 1, 10)
@@ -608,7 +609,7 @@ def EM(model, DATA, epochs, n_iter, update_var=0, extra=None):
         m0[:, :len(regions)], m1[:, :len(regions)], m2[:, :len(regions)] = utils.marginal_moments(DATA, regions, varx, varz)[1:]
 
 
-        for i in range(n_iter):
+        for i in tqdm(range(n_iter), ascii=True, desc='M step'):
             if e > update_var:
                 model['update_var'](batch_signs, DATA, m0, m1, m2)
             for l in np.random.permutation(2 * model['L']) % model['L']:

@@ -527,7 +527,7 @@ def phis_all(ineqs, mu_all, cov_all):
 
 def log_kappa(x, cov_x, cov_z, A, b):
     cov = cov_x + np.einsum('nds,sp,nkp->ndk',A, cov_z, A)
-    print(cov_x,np.einsum('nds,sp,nkp->ndk',A, cov_z, A)[-1])
+    print(np.einsum('nds,sp,nkp->ndk',A, cov_z, A)[-1, -1,-2:])
     kappas = np.array([multivariate_normal.logpdf(x, mean=m, cov=c)
                        for m, c in zip(b, cov)])
     if x.shape[0] == 1:

@@ -112,15 +112,15 @@ for seed in [37, 146, 53, 187, 79]:
         # PLOT DATA
 
         plt.figure(figsize=(5, 5))
-        plt.scatter(predictions[:,0] + noise[:, 0],
-                    predictions[:, 1] + noise[:, 1], color='blue',
+        plt.scatter(predictions[::20,0] + noise[::20, 0],
+                predictions[::20, 1] + noise[::20, 1], color='blue',
                     alpha=0.2)
-        plt.scatter(predictions[:,0], predictions[:, 1], color='red',
+        plt.scatter(predictions[::20,0], predictions[::20, 1], color='red',
                     alpha=0.2)
         plt.scatter(outpute[0], outpute[1], color='k',
                     label=r'$\boldsymbol{x}$')
-        plt.scatter(exp[0], exp[1], color='g', marker='x',
-                    label=r'$\mathbb{E}_{\boldsymbol{z}|\boldsymbol{x}}\left[\boldsymbol{x}\right]$')
+#        plt.scatter(exp[0], exp[1], color='g', marker='x',
+#                    label=r'$\mathbb{E}_{\boldsymbol{z}|\boldsymbol{x}}\left[\boldsymbol{x}\right]$')
 
         ax = plt.gca()
         ax.legend()
@@ -135,7 +135,7 @@ for seed in [37, 146, 53, 187, 79]:
         xxx = np.meshgrid(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N))
         xxx = np.hstack([xxx[0].flatten()[:, None], xxx[1].flatten()[:, None]])
         px, m20, m21, m22 = utils.marginal_moments(xxx, regions, cov_x, np.eye(1))
-        p = px.reshape((N, N))
+        p = np.exp(px).reshape((N, N))
         fig = plt.figure()
         plt.imshow(p, extent=[X0, X1, Y0, Y1])
         plt.contour(np.linspace(X0, X1, N), np.linspace(Y0, Y1, N), 0.7**p, 4,
